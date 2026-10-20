@@ -60,7 +60,7 @@ playbook in `/root/lab/lb` (`alice/lb`); its VM doesn't exist.
 
 | Cluster | Files | Uses |
 |---|---|---|
-| Talos `lab` | `/root/lab/lab.yaml`, `/root/lab/lab-cluster/` | 9 VMs: 3 × 8 GiB control planes, 3 × 12 GiB workers, 3 × 4 GiB storage nodes (72 GiB of the host's 125 GiB); deployed from `alice/gitops` `clusters/lab` |
+| Talos `lab` | `/root/lab/lab.yaml`, `/root/lab/lab-cluster/` | 9 VMs: 3 × 8 GiB / 2 vCPU control planes (disks on the host's NVMe SSD, `/var/lib/libvirt/images-ssd`: etcd), 3 × 12 GiB / 4 vCPU workers, 3 × 4 GiB / 2 vCPU storage nodes (72 GiB of the host's 125 GiB; the other disks on its hard disk, `/var/lib/libvirt/images`); deployed from `alice/gitops` `clusters/lab` |
 
 | URL | What |
 |---|---|
