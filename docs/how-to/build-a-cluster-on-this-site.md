@@ -9,7 +9,7 @@ is a complete working example.
 
 1. Pick an unused LAN address block from `.200` upwards, not overlapping
    `lab`'s `.200-.229`, and add it to the address table of
-   [Site](../reference/site.md#addresses-1921681024).
+   [Site](../reference/site.md#addresses-19202024).
 2. In the cluster file:
 
    | Setting | Value |
