@@ -1,0 +1,13 @@
+---
+# A static VM's name on the router (dnsmasq host entry), owner
+# infra-ansible:<vm>: sync adds or corrects it and touches nothing else.
+- name: DNS record {{ inventory_hostname }} -> {{ libvirt_vm_address }}
+  ansible.builtin.command:
+    cmd: "{{ libvirt_vm_dns_tool }} sync {{ '--dry-run' if ansible_check_mode else '' }}"
+    stdin: >-
+      {{ {'owner': 'infra-ansible:' ~ vm.name,
+          'records': [{'name': inventory_hostname, 'type': 'A', 'address': libvirt_vm_address}]} | to_json }}
+  delegate_to: localhost
+  register: libvirt_vm_dns_sync
+  changed_when: libvirt_vm_dns_sync.stdout is search('(?m)^\s+(add|update|delete)\s')
+  check_mode: false              # --dry-run in --check

@@ -1,0 +1,68 @@
+# {{ ansible_managed }} (role artifact_keeper)
+# Artifact Keeper: PostgreSQL, the backend (API and package endpoints) and
+# the web UI, published on 127.0.0.1 for Caddy. Bind mounts carry 
+# (SELinux: the containers' private label). Images through the site
+# registry's mirrors.
+name: artifact-keeper
+services:
+  postgres:
+    image: {{ artifact_keeper_registry }}/docker.io/library/postgres:{{ artifact_keeper_postgres_version }}
+    env_file: [postgres.env]
+    volumes:
+      - {{ artifact_keeper_data_dir }}/database:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U registry -d artifact_registry"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [ak]
+
+  backend:
+    image: {{ artifact_keeper_registry }}/ghcr.io/artifact-keeper/artifact-keeper-backend:{{ artifact_keeper_backend_version }}
+    depends_on:
+      postgres: {condition: service_healthy}
+    env_file: [backend.env]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      ENVIRONMENT: production
+      STORAGE_BACKEND: filesystem
+      STORAGE_PATH: /data/storage
+      BACKUP_PATH: /data/backups
+      PLUGINS_DIR: /data/plugins
+      LOG_FORMAT: json
+      RUST_LOG: info
+      CORS_ORIGINS: https://{{ artifact_keeper_hostname }}
+      RATE_LIMIT_TRUSTED_PROXY_CIDRS: {{ artifact_keeper_gateway }}/32
+      # The SSRF guard's exceptions: {{ artifact_keeper_ssrf_allow_hosts | join(', ') }}.
+      AK_SSRF_ALLOW_PRIVATE_CIDRS: "{{ artifact_keeper_ssrf_cidrs | join(',') }}"
+      # The OpenAPI document and Swagger UI (the API the Crossplane provider uses).
+      ENABLE_SWAGGER: "true"
+    volumes:
+      - {{ artifact_keeper_data_dir }}/storage:/data/storage
+      - {{ artifact_keeper_data_dir }}/backups:/data/backups
+      - {{ artifact_keeper_data_dir }}/plugins:/data/plugins
+      # The VM's CA bundle, which holds the site CA (Keycloak, upstreams).
+      - {{ artifact_keeper_dir }}/tls-ca-bundle.pem:/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:ro
+    ports:
+      - 127.0.0.1:{{ artifact_keeper_backend_port }}:8080
+    restart: unless-stopped
+    networks: [ak]
+
+  web:
+    image: {{ artifact_keeper_registry }}/ghcr.io/artifact-keeper/artifact-keeper-web:{{ artifact_keeper_web_version }}
+    depends_on: [backend]
+    environment:
+      BACKEND_URL: http://backend:8080
+    ports:
+      - 127.0.0.1:{{ artifact_keeper_web_port }}:3000
+    restart: unless-stopped
+    networks: [ak]
+
+networks:
+  ak:
+    ipam:
+      config:
+        - subnet: {{ artifact_keeper_subnet }}
+          gateway: {{ artifact_keeper_gateway }}

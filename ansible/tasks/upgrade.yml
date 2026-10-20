@@ -1,0 +1,84 @@
+---
+# Tasks of upgrade.yml, for one VM at a time.
+- name: Back up Forgejo first
+  when: "'forgejo' in group_names and not ansible_check_mode"
+  block:
+    - name: Dump Forgejo (repositories, database, configuration)
+      ansible.builtin.command:
+        argv: [/usr/local/bin/forgejo, dump, --config, /etc/forgejo/app.ini, --type, tar.gz,
+               --file, /var/lib/forgejo/upgrade-dump.tar.gz, --tempdir, /var/lib/forgejo, --skip-log]
+        chdir: /var/lib/forgejo
+      become_user: git
+      environment: {FORGEJO_WORK_DIR: /var/lib/forgejo}
+      changed_when: true
+
+    - name: Backup directory on the controller
+      ansible.builtin.file:
+        path: "{{ site_secrets_dir }}/forgejo/backup"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Fetch the dump
+      ansible.builtin.fetch:
+        src: /var/lib/forgejo/upgrade-dump.tar.gz
+        dest: "{{ site_secrets_dir }}/forgejo/backup/forgejo-dump-{{ now(fmt='%Y%m%d-%H%M') }}.tar.gz"
+        flat: true
+      register: upgrade_dump
+
+    - name: Dump permissions on the controller
+      ansible.builtin.file:
+        path: "{{ upgrade_dump.dest }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+    - name: Remove the dump from the VM
+      ansible.builtin.file:
+        path: /var/lib/forgejo/upgrade-dump.tar.gz
+        state: absent
+
+- name: needs-restarting (dnf-plugins-core; part of dnf5)
+  ansible.builtin.dnf:
+    name: dnf-plugins-core
+    state: present
+  when: ansible_facts.distribution != 'Fedora'
+
+- name: Update every package
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    update_cache: true
+  register: upgrade_dnf
+
+- name: Updated packages
+  ansible.builtin.debug:
+    msg: "{{ (upgrade_dnf.results | default([])) | length }} change(s)"
+  when: upgrade_dnf is changed
+
+- name: Does the update need a reboot
+  ansible.builtin.command: dnf needs-restarting -r
+  register: upgrade_restart
+  changed_when: false
+  failed_when: upgrade_restart.rc not in [0, 1]
+  check_mode: false
+
+- name: Reboot
+  ansible.builtin.reboot:
+    reboot_timeout: 900
+  when: upgrade_restart.rc == 1
+
+- name: Wait until the service answers
+  ansible.builtin.uri:
+    url: "{{ upgrade_health[upgrade_group].url }}"
+    status_code: "{{ upgrade_health[upgrade_group].status }}"
+  register: upgrade_up
+  until: upgrade_up.status in upgrade_health[upgrade_group].status
+  retries: 60
+  delay: 5
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  environment:
+    SSL_CERT_FILE: "{{ site_root_ca_file }}"

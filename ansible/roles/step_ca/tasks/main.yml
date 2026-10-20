@@ -1,0 +1,250 @@
+---
+- name: Smallstep package repository
+  ansible.builtin.copy:
+    src: smallstep.repo
+    dest: /etc/yum.repos.d/smallstep.repo
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install step-ca, step-cli and tools
+  ansible.builtin.dnf:
+    name: [step-cli, step-ca, jq, openssl, tar]
+    state: present
+
+- name: step system user
+  ansible.builtin.user:
+    name: step
+    system: true
+    home: "{{ step_ca_path }}"
+    create_home: false
+    shell: /sbin/nologin
+
+- name: CA directory
+  ansible.builtin.file:
+    path: "{{ step_ca_path }}"
+    state: directory
+    owner: step
+    group: step
+    mode: "0700"
+
+- name: Check for an existing CA
+  ansible.builtin.stat:
+    path: "{{ step_ca_path }}/config/ca.json"
+  register: step_ca_config
+
+- name: Newest CA backup on the controller
+  ansible.builtin.set_fact:
+    step_ca_backup: "{{ query('ansible.builtin.fileglob', step_ca_backup_dir ~ '/step-ca-*.tar.gz') | sort | last | default('') }}"
+  when: not step_ca_config.stat.exists and step_ca_restore
+
+- name: Restore the CA from {{ step_ca_backup | default('') }}
+  ansible.builtin.unarchive:
+    src: "{{ step_ca_backup }}"
+    dest: "{{ step_ca_path | dirname }}"
+  when: not step_ca_config.stat.exists and step_ca_restore and step_ca_backup | length > 0
+  register: step_ca_restored
+  notify: Restart step-ca
+
+- name: CA key and provisioner passwords (generated once)
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    openssl rand -base64 32 > {{ step_ca_path }}/{{ item }}
+  args:
+    creates: "{{ step_ca_path }}/{{ item }}"
+  loop: [password.txt, provisioner-password.txt]
+
+- name: Password file permissions
+  ansible.builtin.file:
+    path: "{{ step_ca_path }}/{{ item }}"
+    owner: step
+    group: step
+    mode: "0600"
+  loop: [password.txt, provisioner-password.txt]
+
+- name: Create the CA '{{ step_ca_name }}'
+  ansible.builtin.command:
+    argv: [step, ca, init, --deployment-type, standalone, --name, "{{ step_ca_name }}", --dns, "{{ step_ca_dns }}",
+           --address, ":443", --provisioner, "{{ step_ca_admin }}", --password-file, "{{ step_ca_path }}/password.txt",
+           --provisioner-password-file, "{{ step_ca_path }}/provisioner-password.txt", --acme]
+    creates: "{{ step_ca_path }}/config/ca.json"
+  become_user: step
+  environment:
+    STEPPATH: "{{ step_ca_path }}"
+  register: step_ca_created
+  notify: Restart step-ca
+
+- name: Name constraint script
+  ansible.builtin.copy:
+    src: name-constrain-intermediate.sh
+    dest: /usr/local/sbin/name-constrain-intermediate
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Check the intermediate's name constraint
+  ansible.builtin.shell: >-
+    openssl x509 -in {{ step_ca_path }}/certs/intermediate_ca.crt -noout -ext nameConstraints 2>/dev/null
+    | grep -qx '\s*DNS:{{ step_ca_domain }}'
+  register: step_ca_constrained
+  changed_when: false
+  failed_when: false
+  check_mode: false          # read-only; needed for --check
+
+# Covers the domain and its subdomains at any depth; same root and key.
+- name: Re-issue the intermediate with a name constraint for {{ step_ca_domain }}
+  ansible.builtin.command: /usr/local/sbin/name-constrain-intermediate {{ step_ca_domain }}
+  environment:
+    STEPPATH: "{{ step_ca_path }}"
+  when: step_ca_constrained.rc != 0
+  register: step_ca_reissued
+  changed_when: true
+  notify: Restart step-ca
+
+# The per-label policy would refuse deeper names; the name constraint replaces it.
+- name: Check for a step-ca policy
+  ansible.builtin.command: jq -e '.authority.policy' {{ step_ca_path }}/config/ca.json
+  register: step_ca_policy
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Remove the step-ca policy
+  ansible.builtin.shell: |
+    set -e
+    jq 'del(.authority.policy)' {{ step_ca_path }}/config/ca.json > {{ step_ca_path }}/config/ca.json.new
+    chown step:step {{ step_ca_path }}/config/ca.json.new
+    chmod 600 {{ step_ca_path }}/config/ca.json.new
+    mv {{ step_ca_path }}/config/ca.json.new {{ step_ca_path }}/config/ca.json
+  when: step_ca_policy.rc == 0
+  changed_when: true
+  notify: Restart step-ca
+
+- name: step-ca systemd service
+  ansible.builtin.template:
+    src: step-ca.service.j2
+    dest: /etc/systemd/system/step-ca.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart step-ca
+
+- name: Apply a pending restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Start step-ca
+  ansible.builtin.systemd_service:
+    name: step-ca
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Check for firewalld
+  ansible.builtin.command: systemctl is-active firewalld
+  register: step_ca_firewalld
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Open HTTPS in firewalld
+  ansible.builtin.command: firewall-cmd --permanent --add-service=https
+  when: step_ca_firewalld.stdout == 'active'
+  register: step_ca_fw
+  changed_when: "'ALREADY_ENABLED' not in step_ca_fw.stderr"
+
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  when: step_ca_fw is changed
+  changed_when: true
+
+- name: Trust the root CA on this machine
+  ansible.builtin.copy:
+    src: "{{ step_ca_path }}/certs/root_ca.crt"
+    dest: "{{ site_ca_anchor }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+  register: step_ca_anchor
+
+- name: Update the system trust store
+  ansible.builtin.command: update-ca-trust
+  when: step_ca_anchor is changed
+  changed_when: true
+
+- name: Wait until step-ca answers on https://{{ step_ca_dns }}
+  ansible.builtin.uri:
+    url: "https://{{ step_ca_dns }}/health"
+  register: step_ca_health
+  until: step_ca_health.status == 200
+  retries: 30
+  delay: 2
+  check_mode: false
+
+# The root certificate on the controller is what every other VM trusts. It
+# is written when missing; a different one is never replaced silently: the
+# whole site would have to move to the new CA.
+- name: Read the root certificate
+  ansible.builtin.slurp:
+    src: "{{ step_ca_path }}/certs/root_ca.crt"
+  register: step_ca_root
+
+- name: Compare with {{ site_root_ca_file }}
+  ansible.builtin.set_fact:
+    step_ca_root_local: "{{ lookup('ansible.builtin.file', site_root_ca_file, errors='ignore') | default('', true) }}"
+
+- name: Refuse a CA other than the site's
+  ansible.builtin.assert:
+    that: step_ca_root_local | length == 0 or step_ca_root_local | trim == step_ca_root.content | b64decode | trim
+    fail_msg: >-
+      The CA on {{ inventory_hostname }} is not the one in {{ site_root_ca_file }}. Restore
+      {{ step_ca_path }} from a backup in {{ step_ca_backup_dir }}, or, to move the whole site
+      to this new CA, remove {{ site_root_ca_file }} and re-run (then every VM and cluster).
+    quiet: true
+
+- name: Write {{ site_root_ca_file }}
+  ansible.builtin.copy:
+    content: "{{ step_ca_root.content | b64decode }}"
+    dest: "{{ site_root_ca_file }}"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: step_ca_root_local | length == 0
+
+- name: Back up the CA to the controller
+  when: step_ca_created is changed or step_ca_reissued is changed or step_ca_restored is changed
+  block:
+    - name: Archive {{ step_ca_path }}
+      ansible.builtin.command: tar -C {{ step_ca_path | dirname }} -czf /root/step-ca-backup.tar.gz {{ step_ca_path | basename }}
+      changed_when: true
+
+    # The archive holds the CA keys: root-only on the controller too.
+    - name: Backup directory on the controller
+      ansible.builtin.file:
+        path: "{{ step_ca_backup_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Fetch the archive
+      ansible.builtin.fetch:
+        src: /root/step-ca-backup.tar.gz
+        dest: "{{ step_ca_backup_new }}"
+        flat: true
+      vars:
+        step_ca_backup_new: "{{ step_ca_backup_dir }}/step-ca-{{ now(fmt='%Y%m%d-%H%M') }}.tar.gz"
+      register: step_ca_fetched
+
+    - name: Archive permissions on the controller
+      ansible.builtin.file:
+        path: "{{ step_ca_fetched.dest }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+
+    - name: Remove the archive from the host
+      ansible.builtin.file:
+        path: /root/step-ca-backup.tar.gz
+        state: absent

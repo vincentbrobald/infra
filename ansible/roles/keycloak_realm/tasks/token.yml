@@ -1,0 +1,20 @@
+---
+# Admin access token (master realm); short-lived, so taken again per step.
+- name: Log in as the Keycloak admin
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/realms/master/protocol/openid-connect/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: password
+      client_id: admin-cli
+      username: "{{ keycloak_admin_user | default('admin') }}"
+      password: "{{ lookup('ansible.builtin.file', keycloak_admin_password_file) }}"
+  register: keycloak_realm_login
+  no_log: true
+  check_mode: false          # read-only; needed for --check
+
+- name: Remember the token
+  ansible.builtin.set_fact:
+    keycloak_realm_auth: {Authorization: "Bearer {{ keycloak_realm_login.json.access_token }}"}
+  no_log: true

@@ -1,0 +1,7 @@
+{
+	email {{ caddy_acme_email }}
+	acme_ca {{ caddy_acme_ca }}
+	acme_ca_root {{ site_ca_anchor }}
+}
+
+{{ caddy_sites }}

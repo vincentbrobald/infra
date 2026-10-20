@@ -1,0 +1,14 @@
+---
+- name: Install the private root CA certificate
+  ansible.builtin.copy:
+    src: "{{ keycloak_ca_cert_src }}"
+    dest: "/etc/pki/ca-trust/source/anchors/{{ keycloak_ca_cert_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: keycloak_ca
+
+- name: Update the system trust store
+  ansible.builtin.command: update-ca-trust
+  when: keycloak_ca is changed
+  changed_when: true

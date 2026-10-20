@@ -1,0 +1,10 @@
+---
+galaxy_info:
+  role_name: keycloak
+  description: Keycloak behind Caddy with a local PostgreSQL on AlmaLinux 10
+  license: Apache-2.0
+  min_ansible_version: "2.21"
+  platforms:
+    - name: EL
+      versions: ["10"]
+dependencies: []

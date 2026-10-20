@@ -1,0 +1,39 @@
+---
+# Harbor (https://goharbor.io) on the registry VM: Docker Engine and Harbor's
+# own installer (docker compose), behind Caddy (TLS from the site's ACME CA).
+# This role installs and upgrades Harbor only; what Harbor contains
+# (projects, proxy caches, robot accounts, login through Keycloak) is managed
+# by Crossplane from the gitops repository (provider-upjet-harbor).
+#
+# Pins: Harbor v2.15.4 (2026-10-09) despite being under 14 days old: v2.15.3
+# fixes two security advisories (GHSA-2phj-cp9f-qq6w, GHSA-wrw5-gmvj-gf23),
+# v2.15.4 the regressions of those fixes.
+harbor_version: v2.15.4
+harbor_installer_md5: 78706b63bc8718e4ac6ebae6789098b2   # md5sum file of the release
+
+# Host name Harbor is served at (external_url), and the DNS host entries
+# this role keeps on the router (owner infra-ansible:harbor; [] for none).
+harbor_hostname: "{{ inventory_hostname }}"
+harbor_dns_records: []
+
+harbor_dir: /opt/harbor            # the installer (symlink to /opt/harbor-<version>)
+harbor_data_dir: /var/lib/harbor   # images, database, Redis, Trivy cache
+harbor_log_dir: /var/log/harbor
+harbor_http_port: 8080             # on 127.0.0.1 only (Docker publishes on loopback); Caddy in front
+
+# Credentials, in site_secrets_dir (generated once). The admin password is
+# also what Crossplane logs in with (gitops: crossplane-system/harbor-credentials).
+harbor_admin_password_file: registry/harbor-admin-password
+harbor_admin_password_gitops: {topic: crossplane-system/harbor-credentials, key: password}
+harbor_db_password_file: registry/harbor-db-password
+
+# Caddy's site blocks on this VM (the caddy role writes the whole
+# Caddyfile): Harbor's, plus those of other services there if any.
+harbor_caddy_site: |
+  {{ harbor_hostname }} {
+  	# Image layers: no body size limit, stream without buffering.
+  	reverse_proxy 127.0.0.1:{{ harbor_http_port }} {
+  		flush_interval -1
+  	}
+  }
+harbor_caddy_sites: "{{ harbor_caddy_site }}"

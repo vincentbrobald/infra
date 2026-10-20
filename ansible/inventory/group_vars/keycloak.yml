@@ -1,0 +1,65 @@
+---
+# Keycloak (role "keycloak", formerly the ansible-keycloak repository; see its
+# roles/keycloak/defaults/main.yml) and the site's realm (role keycloak_realm).
+keycloak_hostname: "{{ inventory_hostname }}"
+keycloak_acme_ca: "{{ site_acme_ca }}"
+keycloak_acme_email: "{{ site_acme_email }}"
+keycloak_ca_cert_src: "{{ site_root_ca_file }}"
+keycloak_ca_cert_name: "{{ site_ca_anchor_name }}"
+keycloak_admin_password_file: "{{ site_keycloak_admin_password_file }}"
+
+# Realm of the site's users. Groups: permissions on the clusters (mapped by
+# deploy-talos.py) and the registry. The clusters' own clients (k8s-<name>,
+# argocd-<name>, headlamp-<name>) belong to deploy-talos.py.
+keycloak_realm_name: "{{ site_keycloak_realm }}"
+keycloak_realm_groups: [k8s-admins, argocd-admins, registry-admins]
+# Confidential clients of the services outside the clusters (see
+# roles/keycloak_realm/defaults/main.yml); secret_file under site_secrets_dir,
+# generated when missing.
+keycloak_realm_clients:
+  # Harbor's client (harbor) is
+  # managed by Crossplane: gitops clusters/lab/registries/harbor/keycloak.yaml.
+  - client_id: forgejo
+    root_url: "https://{{ site_forgejo_host }}"
+    base_url: "https://{{ site_forgejo_host }}"
+    redirect_uris: ["https://{{ site_forgejo_host }}/*"]
+    post_logout_redirect_uris: "https://{{ site_forgejo_host }}"
+    groups_claim: false
+    secret_file: forgejo/oidc-client-secret
+  # Omni, the Talos clusters console (omni.yml). Keycloak lets anyone in the
+  # realm log in; Omni admits only the users it knows (omni_initial_users,
+  # then its own user list).
+  - client_id: omni
+    name: Omni
+    root_url: "https://omni.{{ site_domain }}"
+    redirect_uris: ["https://omni.{{ site_domain }}/oidc/consume"]
+    web_origins: ["https://omni.{{ site_domain }}"]
+    post_logout_redirect_uris: "https://omni.{{ site_domain }}"
+    groups_claim: false
+    secret_file: oauth/omni-client-secret
+  # tekton-lab (the Tekton Dashboard's oauth2-proxy on cluster lab) is
+  # managed by Crossplane: gitops
+  # clusters/lab/tekton/dashboard/keycloak-client.yaml. Undo:
+  # docs/how-to/hand-back-to-ansible.md.
+  # Crossplane on cluster lab (gitops: clusters/lab/crossplane), through
+  # provider-keycloak. A service account in master, because the provider
+  # reads /admin/serverinfo there, holding only roles of master's
+  # "<realm>-realm" client, which administer the site's realm and no other.
+  # Observing a confidential client reads its secret, which Keycloak allows
+  # with manage-clients only (view-clients is not enough); what Crossplane
+  # does with it is set per resource (managementPolicies [Observe]: nothing).
+  - client_id: crossplane-lab
+    name: Crossplane (lab)
+    realm: master
+    groups_claim: false
+    service_account_roles:
+      - {client: "{{ site_keycloak_realm }}-realm", role: view-clients}
+      - {client: "{{ site_keycloak_realm }}-realm", role: manage-clients}
+      # The teams' groups (team-<team>) and their members, from the gitops
+      # applications/<org>/<team>/team.yaml files. Keycloak has no
+      # narrower role for groups: manage-users covers all of the realm's
+      # users (not master's).
+      - {client: "{{ site_keycloak_realm }}-realm", role: view-users}
+      - {client: "{{ site_keycloak_realm }}-realm", role: manage-users}
+    secret_file: oauth/crossplane-lab-client-secret
+    gitops: {topic: crossplane-system/keycloak-credentials, key: client_secret}

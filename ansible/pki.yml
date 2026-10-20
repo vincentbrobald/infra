@@ -1,0 +1,19 @@
+---
+# step-ca on pki: the site's CA (ACME for Caddy and cert-manager).
+# The VM is created first when it does not exist (role libvirt_vm).
+#   ansible-playbook pki.yml [--check --diff]
+- name: VM
+  hosts: pki
+  gather_facts: false
+  tags: [vm]
+  roles:
+    - libvirt_vm
+
+- name: Certificate authority
+  hosts: pki
+  become: true
+  gather_facts: false          # site_guard gathers them
+  roles:
+    - site_guard
+    - step_ca
+    - {role: site_ca, site_ca_install: false}   # retire the CA's earlier file names

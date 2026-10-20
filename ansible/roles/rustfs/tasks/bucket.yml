@@ -1,0 +1,56 @@
+---
+# Object lock can only be enabled when the bucket is created.
+- name: Create bucket {{ bucket.name }}
+  ansible.builtin.command: >-
+    /usr/local/bin/rc bucket create {{ '--with-versioning --with-lock' if bucket.lock is defined else '' }} local/{{ bucket.name }}
+  when: bucket.name not in (rustfs_ls.stdout | from_json)['items'] | map(attribute='key') | list
+  changed_when: true
+
+- name: Default retention of {{ bucket.name }}
+  when: bucket.lock is defined
+  block:
+    - name: Read the retention of {{ bucket.name }}
+      ansible.builtin.command: /usr/local/bin/rc bucket lock info local/{{ bucket.name }} --json
+      register: rustfs_lock
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Set the retention of {{ bucket.name }}
+      ansible.builtin.command: >-
+        /usr/local/bin/rc bucket lock set local/{{ bucket.name }} --mode {{ bucket.lock.mode }} --days {{ bucket.lock.days }}
+      when: >-
+        rustfs_lock.rc != 0 or
+        ((rustfs_lock.stdout | from_json).data['items'][0].default_retention | default({}, true))
+        != {'mode': bucket.lock.mode, 'duration': {'unit': 'days', 'value': bucket.lock.days | int}}
+      changed_when: true
+
+- name: Lifecycle of {{ bucket.name }}
+  when: bucket.lifecycle is defined
+  block:
+    - name: Read the lifecycle rules of {{ bucket.name }}
+      ansible.builtin.command: /usr/local/bin/rc bucket lifecycle rule list local/{{ bucket.name }} --json
+      register: rustfs_rules
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # Two rules: current versions expire after expiry_days; replaced or
+    # deleted ones (and orphaned delete markers) after noncurrent_expiry_days.
+    - name: Replace the lifecycle rules of {{ bucket.name }}
+      ansible.builtin.shell: |
+        set -e
+        rc() { /usr/local/bin/rc "$@"; }
+        rc bucket lifecycle rule remove local/{{ bucket.name }} --all >/dev/null 2>&1 || true
+        rc bucket lifecycle rule add local/{{ bucket.name }} --expiry-days {{ bucket.lifecycle.expiry_days }}
+        rc bucket lifecycle rule add local/{{ bucket.name }} --noncurrent-expiry-days {{ bucket.lifecycle.noncurrent_expiry_days }} --expired-object-delete-marker
+      vars:
+        rules: "{{ (rustfs_rules.stdout | from_json).rules | default([]) if rustfs_rules.rc == 0 else [] }}"
+      when: >-
+        rules | length != 2 or
+        rules | selectattr('expiration.days', 'defined') | map(attribute='expiration.days') | list
+          != [bucket.lifecycle.expiry_days | int] or
+        rules | selectattr('noncurrentVersionExpiration', 'defined')
+          | map(attribute='noncurrentVersionExpiration.noncurrentDays') | list
+          != [bucket.lifecycle.noncurrent_expiry_days | int]
+      changed_when: true

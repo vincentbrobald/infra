@@ -1,0 +1,42 @@
+---
+# A protected-branch rule. Its keys are the API's own (POST and PATCH
+# /repos/{owner}/{repo}/branch_protections): rule_name plus e.g.
+# enable_status_check, status_check_contexts, block_on_outdated_branch,
+# enable_push, push_whitelist_deploy_keys. Keys not given keep Forgejo's
+# value; the rule is updated when a given key differs.
+- name: Compare rule {{ rule.rule_name }}
+  ansible.builtin.set_fact:
+    forgejo_rule: "{{ forgejo_protections.json | selectattr('rule_name', 'equalto', rule.rule_name) | first | default({}) }}"
+    forgejo_rule_changes: >-
+      {%- set current = forgejo_protections.json | selectattr('rule_name', 'equalto', rule.rule_name) | first | default({}) -%}
+      {%- set changes = {} -%}
+      {%- for k, v in rule.items() if k != 'rule_name' and current.get(k) != v -%}
+      {%- set _ = changes.update({k: v}) -%}
+      {%- endfor -%}
+      {{ changes }}
+
+- name: Create protection {{ rule.rule_name }}
+  ansible.builtin.uri:
+    url: "{{ r }}/branch_protections"
+    method: POST
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    body_format: json
+    body: "{{ rule }}"
+    status_code: 201
+  when: forgejo_rule | length == 0
+  changed_when: true
+
+- name: Update protection {{ rule.rule_name }} ({{ forgejo_rule_changes.keys() | join(', ') }})
+  ansible.builtin.uri:
+    url: "{{ r }}/branch_protections/{{ rule.rule_name | urlencode }}"
+    method: PATCH
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    body_format: json
+    body: "{{ forgejo_rule_changes }}"
+    status_code: 200
+  when: forgejo_rule | length > 0 and forgejo_rule_changes | length > 0
+  changed_when: true

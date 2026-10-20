@@ -1,0 +1,53 @@
+# Omni, managed by Ansible (role omni). Podman quadlet: systemd runs it as
+# the service "omni".
+[Unit]
+Description=Omni (Talos clusters console and API)
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+Image={{ omni_image }}
+ContainerName=omni
+# Host network: the WireGuard interface and the loopback ports Caddy reaches.
+Network=host
+AddCapability=NET_ADMIN
+AddDevice=/dev/net/tun
+Volume={{ omni_data_dir }}:/_out:Z
+Volume={{ omni_config_dir }}:/etc/omni:ro,Z
+# The VM's CA bundle (system roots and the site CA, role site_ca): Omni calls
+# Keycloak and the image factory over HTTPS.
+Volume=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem:/etc/ssl/certs/ca-certificates.crt:ro,z
+Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+Exec=--config-path=/etc/omni/config.yaml \
+  --account-id={{ omni_account_id }} \
+  --name={{ omni_account_name }} \
+  --private-key-source=file:///etc/omni/omni.asc \
+  --sqlite-storage-path=/_out/sqlite/omni.db \
+  --bind-addr=127.0.0.1:{{ omni_api_port }} \
+  --advertised-api-url=https://{{ omni_hostname }}/ \
+  --machine-api-bind-addr=127.0.0.1:{{ omni_machine_api_port }} \
+  --siderolink-api-advertised-url=https://{{ omni_hostname }}:8090/ \
+  --k8s-proxy-bind-addr=127.0.0.1:{{ omni_k8s_proxy_port }} \
+  --advertised-kubernetes-proxy-url=https://{{ omni_hostname }}:8100/ \
+  --siderolink-wireguard-advertised-addr={{ ansible_default_ipv4.address }}:{{ omni_wireguard_port }} \
+  --event-sink-port={{ omni_event_sink_port }} \
+  --auth-auth0-enabled=false \
+  --auth-oidc-enabled=true \
+  --auth-oidc-provider-url={{ omni_oidc_issuer }} \
+  --auth-oidc-client-id={{ omni_oidc_client_id }} \
+  --auth-oidc-scopes=openid --auth-oidc-scopes=profile --auth-oidc-scopes=email \
+{% for u in omni_initial_users %}
+  --initial-users={{ u }} \
+{% endfor %}
+  --create-initial-service-account \
+  --initial-service-account-key-path=/_out/initial-service-account-key \
+  --initial-service-account-lifetime={{ omni_service_account_lifetime }} \
+  --eula-accept-name={{ omni_eula_name | quote }} \
+  --eula-accept-email={{ omni_eula_email }}
+
+[Service]
+Restart=always
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

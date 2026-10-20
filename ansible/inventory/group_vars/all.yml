@@ -1,0 +1,58 @@
+---
+# Site settings shared by every playbook. Service host names come from the
+# inventory groups, so another inventory (e.g. a test one) needs no change here.
+site_domain: example.org
+
+# The directory holding infra/, lab-secrets/, the clusters' files, ...:
+# every local path below is relative to it, so the tree can move.
+site_lab_dir: "{{ playbook_dir | dirname | dirname }}"
+
+# Credentials: files in this tree (mode 600, never in git). site_secret reads
+# them; it creates the ones that may be generated.
+site_secrets_dir: "{{ site_lab_dir }}/lab-secrets"
+
+# The step-ca root certificate, public; every VM trusts it. pki.yml writes it
+# when missing and refuses to replace a different one.
+site_root_ca_file: "{{ site_lab_dir }}/infra/pki/root_ca.crt"
+site_ca_anchor_name: site-root-ca.crt
+# Earlier names of that file: removed from the VMs' trust stores (role site_ca).
+site_ca_retired_anchor_names: [example-root-ca.crt]
+site_ca_anchor: "/etc/pki/ca-trust/source/anchors/{{ site_ca_anchor_name }}"
+
+site_pki_host: "{{ groups['pki'][0] }}"
+site_acme_ca: "https://{{ site_pki_host }}/acme/acme/directory"
+site_acme_email: "admin@{{ site_domain }}"
+
+site_keycloak_host: "{{ groups['keycloak'][0] }}"
+site_keycloak_realm: example
+site_oidc_issuer: "https://{{ site_keycloak_host }}/realms/{{ site_keycloak_realm }}"
+site_keycloak_admin_password_file: "{{ site_secrets_dir }}/oauth/keycloak-admin-password"
+
+site_s3_host: "{{ groups['s3'][0] }}"
+site_registry_host: "{{ groups['registry'][0] }}"
+site_forgejo_host: "{{ groups['forgejo'][0] }}"
+
+# Gitops repository: a credential whose Secret (topic) is already there,
+# SOPS-encrypted, is taken from it and never replaced (site_secret). gitops.yml
+# keeps a read-only checkout; empty site_gitops_repo: use the checkout as is.
+site_gitops_repo: "ssh://git@{{ site_forgejo_host }}:2222/alice/gitops.git"
+site_gitops_ssh_key_file: "{{ site_lab_dir }}/forgejo-test/deploy_key"   # read-only deploy key
+site_gitops_checkout: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/infra-ansible/gitops"
+site_sops_version: v3.13.3
+site_sops_bin: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/infra-ansible/sops-{{ site_sops_version }}"
+site_sops_age_key_file: "{{ site_secrets_dir }}/sops/admin.agekey"
+
+# VMs (role libvirt_vm). Addressing, per VM with vm.network (default below):
+#   dhcp    the router's DHCP gives the address and registers the name (a
+#           fixed MAC keeps the lease)
+#   static  vm.address, set by cloud-init; the name is registered on the
+#           router by dns/opnsense-dns.py (owner infra-ansible:<vm>)
+site_vm_bridge: bridge0
+site_vm_network: dhcp
+site_vm_prefix_length: 24
+site_vm_gateway: 192.0.2.1
+site_vm_nameservers: [192.0.2.1]
+site_dns_tool: "{{ site_lab_dir }}/infra/dns/opnsense-dns.py"
+
+# Caddy, on every VM that serves HTTPS: its release binary (role caddy).
+caddy_version: 2.11.7

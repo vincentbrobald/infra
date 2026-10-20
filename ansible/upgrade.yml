@@ -1,0 +1,51 @@
+---
+# OS updates of the infrastructure VMs, one at a time, Forgejo last: every
+# package to its latest version, a reboot only when the update needs one
+# (new kernel, core libraries: dnf needs-restarting -r), then the VM's
+# service must answer before the next VM starts. Forgejo is dumped first
+# (repositories and database) to site_secrets_dir/forgejo/backup/.
+#   ansible-playbook upgrade.yml [--limit <host>] [--check]
+- name: OS updates
+  hosts: pki:keycloak:s3:registry:!forgejo
+  become: true
+  serial: 1
+  gather_facts: false
+  vars:
+    # What must answer after the update (status codes accepted).
+    upgrade_health:
+      pki: {url: "https://{{ inventory_hostname }}/health", status: [200]}
+      keycloak: {url: "https://{{ inventory_hostname }}/realms/{{ site_keycloak_realm }}/.well-known/openid-configuration", status: [200]}
+      s3: {url: "https://{{ inventory_hostname }}/health", status: [200]}
+      registry: {url: "https://{{ inventory_hostname }}/v2/", status: [200, 401]}
+      forgejo: {url: "https://{{ inventory_hostname }}/api/v1/version", status: [200, 403]}
+    upgrade_group: "{{ group_names | intersect(upgrade_health.keys() | list) | first }}"
+  pre_tasks:
+    - name: Facts
+      ansible.builtin.setup:
+        gather_subset: [min]
+  tasks:
+    - name: Update
+      ansible.builtin.import_tasks: tasks/upgrade.yml
+
+# Last: the Git server, after a dump of its data.
+- name: OS updates of Forgejo
+  hosts: forgejo
+  become: true
+  serial: 1
+  gather_facts: false
+  vars:
+    # What must answer after the update (status codes accepted).
+    upgrade_health:
+      pki: {url: "https://{{ inventory_hostname }}/health", status: [200]}
+      keycloak: {url: "https://{{ inventory_hostname }}/realms/{{ site_keycloak_realm }}/.well-known/openid-configuration", status: [200]}
+      s3: {url: "https://{{ inventory_hostname }}/health", status: [200]}
+      registry: {url: "https://{{ inventory_hostname }}/v2/", status: [200, 401]}
+      forgejo: {url: "https://{{ inventory_hostname }}/api/v1/version", status: [200, 403]}
+    upgrade_group: "{{ group_names | intersect(upgrade_health.keys() | list) | first }}"
+  pre_tasks:
+    - name: Facts
+      ansible.builtin.setup:
+        gather_subset: [min]
+  tasks:
+    - name: Update
+      ansible.builtin.import_tasks: tasks/upgrade.yml

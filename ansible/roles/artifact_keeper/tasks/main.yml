@@ -1,0 +1,117 @@
+---
+- name: Credentials
+  ansible.builtin.set_fact:
+    artifact_keeper_admin_password: "{{ lookup('site_secret', artifact_keeper_admin_password_file, generate='alnum:32') }}"
+    artifact_keeper_db_password: "{{ lookup('site_secret', artifact_keeper_db_password_file, generate='alnum:32') }}"
+    artifact_keeper_jwt_secret: "{{ lookup('site_secret', artifact_keeper_jwt_secret_file, generate='hex:32') }}"
+    artifact_keeper_webhook_key: "{{ lookup('site_secret', artifact_keeper_webhook_key_file, generate='base64:32') }}"
+    artifact_keeper_peer_api_key: "{{ lookup('site_secret', artifact_keeper_peer_api_key_file, generate='hex:32') }}"
+  no_log: true
+
+- name: Docker
+  ansible.builtin.include_role:
+    name: docker
+
+# Resolved on the control host (the site's DNS): getent prints the address first.
+- name: Addresses of the private hosts the backend may call
+  ansible.builtin.set_fact:
+    artifact_keeper_ssrf_cidrs: "{{ artifact_keeper_ssrf_cidrs | default([]) + [lookup('ansible.builtin.pipe', 'getent ahostsv4 ' ~ item).split()[0] ~ '/32'] }}"
+  loop: "{{ artifact_keeper_ssrf_allow_hosts }}"
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+    mode: "{{ item.mode | default('0750') }}"
+  loop:
+    - {path: "{{ artifact_keeper_dir }}"}
+    - {path: "{{ artifact_keeper_data_dir }}", mode: "0755"}
+    # PostgreSQL (uid 70 in the alpine image) creates its versioned directory
+    # there itself. Not named "postgres": SELinux labels such paths
+    # postgresql_db_t, which containers can't write.
+    - {path: "{{ artifact_keeper_data_dir }}/database", owner: "70", group: "70", mode: "0700"}
+    # The backend runs as uid 1001.
+    - {path: "{{ artifact_keeper_data_dir }}/storage", owner: "1001", group: "0"}
+    - {path: "{{ artifact_keeper_data_dir }}/backups", owner: "1001", group: "0"}
+    - {path: "{{ artifact_keeper_data_dir }}/plugins", owner: "1001", group: "0"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Configuration
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ artifact_keeper_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {src: docker-compose.yml.j2, dest: docker-compose.yml, mode: "0644"}
+    - {src: backend.env.j2, dest: backend.env, mode: "0600"}
+    - {src: postgres.env.j2, dest: postgres.env, mode: "0600"}
+  loop_control:
+    label: "{{ item.dest }}"
+  notify: Restart artifact-keeper
+  no_log: true
+
+# The VM's CA bundle (site CA included, role site_ca), for the backend.
+- name: CA bundle for the backend
+  ansible.builtin.copy:
+    src: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+    remote_src: true
+    dest: "{{ artifact_keeper_dir }}/tls-ca-bundle.pem"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart artifact-keeper
+
+- name: artifact-keeper systemd service
+  ansible.builtin.template:
+    src: artifact-keeper.service.j2
+    dest: /etc/systemd/system/artifact-keeper.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart artifact-keeper
+
+- name: Start Artifact Keeper
+  ansible.builtin.systemd_service:
+    name: artifact-keeper
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Apply a pending restart
+  ansible.builtin.meta: flush_handlers
+
+- name: DNS records {{ artifact_keeper_dns_records | join(', ') }} -> this VM
+  ansible.builtin.command:
+    cmd: "{{ site_dns_tool }} sync {{ '--dry-run' if ansible_check_mode else '' }}"
+    stdin: >-
+      {%- set records = [] -%}
+      {%- for n in artifact_keeper_dns_records -%}
+      {%- set _ = records.append({'name': n, 'type': 'A', 'address': ansible_default_ipv4.address}) -%}
+      {%- endfor -%}
+      {{ {'owner': 'infra-ansible:artifact_keeper', 'records': records} | to_json }}
+  delegate_to: localhost
+  become: false
+  register: artifact_keeper_dns
+  changed_when: artifact_keeper_dns.stdout is search('(?m)^\s+(add|update|delete)\s')
+  check_mode: false
+  when: artifact_keeper_dns_records | length > 0
+
+- name: Caddy
+  ansible.builtin.include_role:
+    name: caddy
+  vars:
+    caddy_sites: "{{ artifact_keeper_caddy_sites }}"
+
+- name: Wait until Artifact Keeper answers on https://{{ artifact_keeper_hostname }}/health
+  ansible.builtin.uri:
+    url: "https://{{ artifact_keeper_hostname }}/health"
+  register: artifact_keeper_health
+  until: artifact_keeper_health.status == 200
+  retries: 60
+  delay: 5
+  check_mode: false

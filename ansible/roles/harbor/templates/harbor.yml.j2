@@ -1,0 +1,60 @@
+# {{ ansible_managed }} (role harbor). Read by Harbor's prepare script, which
+# writes docker-compose.yml and common/config from it.
+hostname: {{ harbor_hostname }}
+# Plain HTTP on loopback: Caddy terminates TLS.
+http:
+  port: {{ harbor_http_port }}
+external_url: https://{{ harbor_hostname }}
+# Only used at the first start; Crossplane logs in with it.
+harbor_admin_password: {{ harbor_admin_password }}
+database:
+  password: {{ harbor_db_password }}
+  max_idle_conns: 100
+  max_open_conns: 900
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 0
+data_volume: {{ harbor_data_dir }}
+trivy:
+  ignore_unfixed: false
+  skip_update: false
+  skip_java_db_update: false
+  db_repository: ghcr.io/aquasecurity/trivy-db
+  java_db_repository: ghcr.io/aquasecurity/trivy-java-db
+  offline_scan: false
+  security_check: vuln
+  insecure: false
+  timeout: 5m0s
+jobservice:
+  max_job_workers: 10
+  max_job_duration_hours: 24
+  job_loggers: [STD_OUTPUT, FILE]
+  logger_sweeper_duration: 1
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3
+log:
+  level: info
+  local:
+    rotate_count: 50
+    rotate_size: 200M
+    location: {{ harbor_log_dir }}
+_version: 2.15.0
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy:
+  components: [core, jobservice, trivy]
+# Keep v2.15.3's protection: no webhooks to private addresses (v2.15.4
+# turned it off by default).
+network:
+  allow_private_network_access: false
+content_trust:
+  legacy_signer_pull_enabled: true
+upload_purging:
+  enabled: true
+  age: 168h
+  interval: 24h
+  dryrun: false
+cache:
+  enabled: false
+  expire_hours: 24

@@ -1,0 +1,17 @@
+---
+# The site's Keycloak realm: realm, groups and the confidential OIDC clients
+# of services outside the clusters. Settings made in the console that are
+# not listed here are kept.
+keycloak_realm_name: ""
+keycloak_realm_groups: []
+# Each client:
+#   client_id, secret_file (under site_secrets_dir; generated when missing)
+#   realm (default keycloak_realm_name), redirect_uris, web_origins (default
+#   []), name, root_url, base_url,
+#   post_logout_redirect_uris (string), groups_claim (default true: flat
+#   "groups" claim with the group names), gitops ({topic, key}: a Secret of
+#   the gitops repository holding the same secret; its value wins),
+#   service_account_roles (list of {client, role}: a service account client,
+#   no browser login, granted these client roles of its realm)
+keycloak_realm_clients: []
+keycloak_realm_url: "http://127.0.0.1:{{ keycloak_http_port | default(8080) }}"

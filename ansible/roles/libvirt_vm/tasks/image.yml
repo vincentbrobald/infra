@@ -1,0 +1,78 @@
+---
+# The newest AlmaLinux 10 GenericCloud image, cached in libvirt_vm_cache_dir:
+# CHECKSUM is verified against its detached GPG signature with the pinned
+# key, then the image against CHECKSUM.
+- name: Image cache directory
+  ansible.builtin.file:
+    path: "{{ libvirt_vm_cache_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Verification directory
+  ansible.builtin.tempfile:
+    state: directory
+    suffix: -alma-gpg
+  register: libvirt_vm_gpg
+
+- name: Download the key, CHECKSUM and its signature
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ libvirt_vm_gpg.path }}/{{ item.name }}"
+    mode: "0600"
+  loop:
+    - {url: "{{ libvirt_vm_alma_key_url }}", name: key.asc}
+    - {url: "{{ libvirt_vm_alma_base }}/CHECKSUM", name: CHECKSUM}
+    - {url: "{{ libvirt_vm_alma_base }}/CHECKSUM.asc", name: CHECKSUM.asc}
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Verify CHECKSUM with key {{ libvirt_vm_alma_key_fpr }}
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export GNUPGHOME={{ libvirt_vm_gpg.path }}
+    gpg --batch --quiet --import key.asc 2>/dev/null
+    gpg --batch --export {{ libvirt_vm_alma_key_fpr }} > pinned.gpg
+    test -s pinned.gpg || { echo "key {{ libvirt_vm_alma_key_fpr }} not found" >&2; exit 1; }
+    gpgv --status-fd 1 --keyring ./pinned.gpg CHECKSUM.asc CHECKSUM 2>/dev/null
+  args:
+    chdir: "{{ libvirt_vm_gpg.path }}"
+  register: libvirt_vm_gpgv
+  changed_when: false
+
+- name: Refuse a CHECKSUM not signed by the pinned key
+  ansible.builtin.assert:
+    that: libvirt_vm_gpgv.stdout is search('VALIDSIG ' ~ libvirt_vm_alma_key_fpr ~ ' ')
+    fail_msg: "CHECKSUM is not signed by {{ libvirt_vm_alma_key_fpr }}"
+    quiet: true
+
+# Newest dated GenericCloud (XFS) image, so the cache is versioned.
+- name: Pick the newest image
+  ansible.builtin.set_fact:
+    libvirt_vm_image_line: >-
+      {{ lookup('ansible.builtin.file', libvirt_vm_gpg.path ~ '/CHECKSUM').splitlines()
+         | select('match', '^[0-9a-f]{64}  AlmaLinux-10-GenericCloud-10\.[0-9]+-[0-9]+\.[0-9]+\.x86_64\.qcow2$')
+         | sort | last | default('') }}
+
+- name: Refuse a CHECKSUM without an image
+  ansible.builtin.assert:
+    that: libvirt_vm_image_line | length > 0
+    fail_msg: no GenericCloud image listed in CHECKSUM
+    quiet: true
+
+- name: Remove the verification directory
+  ansible.builtin.file:
+    path: "{{ libvirt_vm_gpg.path }}"
+    state: absent
+
+- name: Image path
+  ansible.builtin.set_fact:
+    libvirt_vm_image: "{{ libvirt_vm_cache_dir }}/{{ libvirt_vm_image_line.split()[1] }}"
+
+# Kept in the cache; downloaded only when missing or not matching CHECKSUM.
+- name: Download {{ libvirt_vm_image | basename }}
+  ansible.builtin.get_url:
+    url: "{{ libvirt_vm_alma_base }}/{{ libvirt_vm_image | basename }}"
+    dest: "{{ libvirt_vm_image }}"
+    checksum: "sha256:{{ libvirt_vm_image_line.split()[0] }}"
+    mode: "0600"
+  throttle: 1                    # VMs created together share the download

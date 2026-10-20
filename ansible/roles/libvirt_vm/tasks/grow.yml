@@ -1,0 +1,42 @@
+---
+# An existing VM whose vm.disk is larger than its disk: grow the disk (live
+# when running). Never shrinks: a smaller vm.disk is only reported. Then, on
+# every run, the root file system takes all the disk (fill.yml).
+- name: Disk of {{ vm.name }}
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    virsh -c {{ libvirt_vm_uri }} domblklist {{ vm.name }} --details | awk '$2 == "disk" && !found {print $3, $4; found = 1}'
+  delegate_to: localhost
+  register: libvirt_vm_blk
+  changed_when: false
+  check_mode: false              # read-only; needed for --check
+
+- name: Size of the disk of {{ vm.name }}
+  ansible.builtin.command: qemu-img info -U --output=json {{ libvirt_vm_blk.stdout.split()[1] }}
+  delegate_to: localhost
+  register: libvirt_vm_img
+  changed_when: false
+  check_mode: false
+
+- name: Compare with vm.disk
+  ansible.builtin.set_fact:
+    libvirt_vm_disk_have: "{{ (libvirt_vm_img.stdout | from_json)['virtual-size'] | int }}"
+    libvirt_vm_disk_want: "{{ vm.disk | default('20G') | regex_replace('([KMGT])$', '\\1B') | human_to_bytes }}"
+
+- name: Report a vm.disk smaller than the disk (never shrunk)
+  ansible.builtin.debug:
+    msg: "WARNING: {{ vm.name }}'s disk is {{ libvirt_vm_disk_have | int | human_readable }}, more than vm.disk {{ vm.disk }}: left as is"
+  when: libvirt_vm_disk_want | int < libvirt_vm_disk_have | int
+
+- name: Grow the disk of {{ vm.name }} to {{ vm.disk }}
+  when: libvirt_vm_disk_want | int > libvirt_vm_disk_have | int
+  block:
+    - name: Resize the disk image (live)
+      ansible.builtin.command: >-
+        virsh -c {{ libvirt_vm_uri }} blockresize {{ vm.name }} {{ libvirt_vm_blk.stdout.split()[0] }}
+        {{ libvirt_vm_disk_want }}B
+      delegate_to: localhost
+      changed_when: true
+
+- name: Root file system fills the disk
+  ansible.builtin.include_tasks: fill.yml

@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Keycloak
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=exec
+User={{ keycloak_user }}
+Group={{ keycloak_user }}
+EnvironmentFile=-/etc/keycloak/bootstrap.env
+ExecStart={{ keycloak_home }}/bin/kc.sh start --optimized
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

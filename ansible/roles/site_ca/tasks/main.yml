@@ -1,0 +1,25 @@
+---
+# The site's root CA (step-ca on pki), trusted system-wide: Caddy's ACME
+# client, curl, and services calling each other over HTTPS rely on it.
+# site_ca_install false: another role installs it (pki, Keycloak); this one
+# then only retires the old file names.
+- name: Install the site's root CA certificate
+  ansible.builtin.copy:
+    src: "{{ site_root_ca_file }}"
+    dest: "{{ site_ca_anchor }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: site_ca_install | default(true)
+  notify: Update the system trust store
+
+# Removed only once the current file is in place: no moment without the CA.
+- name: Remove the CA under its earlier file names
+  ansible.builtin.file:
+    path: "/etc/pki/ca-trust/source/anchors/{{ item }}"
+    state: absent
+  loop: "{{ site_ca_retired_anchor_names | default([]) | reject('equalto', site_ca_anchor_name) | list }}"
+  notify: Update the system trust store
+
+- name: Apply a pending trust store update
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,13 @@
+---
+# Reload, not restart: keeps Caddy's certificates and connections.
+- name: Reload caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: reloaded
+
+# A new binary or unit needs a restart (a reload keeps the running binary).
+- name: Restart caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: restarted
+    daemon_reload: true

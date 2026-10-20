@@ -1,0 +1,23 @@
+---
+# Omni on omni: the Sidero Labs console and API for Talos clusters, behind
+# Caddy, login with Keycloak. Optional: it acts only when the inventory has a
+# host in the group "omni" (remove the group to go without). Needs
+# keycloak.yml (its client) and registry.yml (the image's mirror) first.
+# The VM is created first when it does not exist (role libvirt_vm).
+#   ansible-playbook omni.yml [--check --diff]
+# Importing a cluster into Omni: deploy-talos.py omni -f <cluster file>.
+- name: VM
+  hosts: omni
+  gather_facts: false
+  tags: [vm]
+  roles:
+    - libvirt_vm
+
+- name: Omni
+  hosts: omni
+  become: true
+  gather_facts: false          # site_guard gathers them
+  roles:
+    - site_guard
+    - site_ca
+    - omni

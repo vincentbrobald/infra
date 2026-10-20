@@ -1,0 +1,5 @@
+---
+# Omni on omni (role omni; see roles/omni/defaults/main.yml).
+omni_initial_users: [maintainer@example.org, sso-admin@example.org]
+omni_eula_name: alice
+omni_eula_email: maintainer@example.org

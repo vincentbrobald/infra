@@ -1,0 +1,100 @@
+---
+# Artifact Keeper (https://github.com/artifact-keeper/artifact-keeper, MIT) on
+# the artifacts VM: a universal package registry (Maven, npm, PyPI, generic,
+# 45+ formats; hosted, proxy and virtual repositories), its backend (Rust) and
+# web UI as docker compose with PostgreSQL, behind Caddy (TLS from the site's
+# ACME CA). This role installs and upgrades it; what it contains
+# (repositories, groups, permissions, the Keycloak login) is meant to come
+# from Crossplane (gitops). Optional parts left out: OpenSearch (full-text
+# search), Trivy/OpenSCAP (scanning), Dependency-Track.
+#
+# Pins (released 14 days or more before 2026-10-16): backend 1.10.2
+# (2026-10-01), web 1.10.1 (2026-09-21; the UI is versioned on its own),
+# PostgreSQL 18.6 (2026-09-21).
+artifact_keeper_backend_version: 1.10.2
+artifact_keeper_web_version: 1.10.1
+artifact_keeper_postgres_version: 18.6-alpine
+
+# Images through the site registry's mirrors (Harbor proxy projects).
+artifact_keeper_registry: "{{ site_registry_host }}"
+
+artifact_keeper_hostname: "{{ inventory_hostname }}"
+artifact_keeper_dns_records: []      # host entries on the router (owner infra-ansible:artifact_keeper)
+
+artifact_keeper_dir: /opt/artifact-keeper          # docker-compose.yml, backend.env
+artifact_keeper_data_dir: /var/lib/artifact-keeper # database/, storage/ (packages), backups/, plugins/
+artifact_keeper_backend_port: 8081   # on 127.0.0.1; Caddy in front
+artifact_keeper_web_port: 3000
+# The compose network: Caddy's requests reach the containers from its
+# gateway (Docker's userland proxy), which the backend trusts for
+# X-Forwarded-For.
+artifact_keeper_subnet: 172.30.0.0/24
+artifact_keeper_gateway: 172.30.0.1
+
+# Private hosts the backend may call despite its SSRF guard (it refuses
+# private addresses by default): Keycloak, for the OIDC login. Resolved at
+# deploy time into AK_SSRF_ALLOW_PRIVATE_CIDRS (/32 each): run the playbook
+# again if one moves.
+artifact_keeper_ssrf_allow_hosts: ["{{ groups['keycloak'][0] }}"]
+
+# Credentials, in site_secrets_dir (generated once). The admin password is
+# the local "admin" (break-glass, and what Crossplane will log in with).
+artifact_keeper_admin_password_file: artifacts/admin-password
+artifact_keeper_db_password_file: artifacts/db-password
+artifact_keeper_jwt_secret_file: artifacts/jwt-secret          # signs sessions
+artifact_keeper_webhook_key_file: artifacts/webhook-key        # encrypts webhook secrets (32 bytes)
+artifact_keeper_peer_api_key_file: artifacts/peer-api-key      # replication between instances (unused; else a new one at each start)
+
+# Paths the backend serves (the rest is the web UI): its API and the
+# package formats' endpoints, as in the project's own docker/Caddyfile.
+artifact_keeper_backend_paths:
+  - /api/*
+  - /health
+  - /livez
+  - /readyz
+  - /swagger-ui*
+  - /api-docs*
+  - /v2
+  - /v2/*
+  - /maven/*
+  - /npm/*
+  - /pypi/*
+  - /nuget/*
+  - /cargo/*
+  - /gems/*
+  - /go/*
+  - /helm/*
+  - /debian/*
+  - /rpm/*
+  - /alpine/*
+  - /composer/*
+  - /conan/*
+  - /conda/*
+  - /swift/*
+  - /terraform/*
+  - /cocoapods/*
+  - /hex/*
+  - /pub/*
+  - /lfs/*
+  - /ivy/*
+  - /chef/*
+  - /puppet/*
+  - /ansible/*
+  - /cran/*
+  - /huggingface/*
+  - /jetbrains/*
+  - /vscode/*
+  - /proto/*
+  - /incus/*
+  - /ext/*
+
+artifact_keeper_caddy_site: |
+  {{ artifact_keeper_hostname }} {
+  	@backend path {{ artifact_keeper_backend_paths | join(' ') }}
+  	# Package uploads: no body size limit, stream without buffering.
+  	reverse_proxy @backend 127.0.0.1:{{ artifact_keeper_backend_port }} {
+  		flush_interval -1
+  	}
+  	reverse_proxy 127.0.0.1:{{ artifact_keeper_web_port }}
+  }
+artifact_keeper_caddy_sites: "{{ artifact_keeper_caddy_site }}"

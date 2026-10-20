@@ -1,0 +1,38 @@
+---
+# Caddy's release binary, as on the other VMs (role caddy; caddy_version "":
+# the package's binary).
+- name: Caddy release binary
+  ansible.builtin.include_role:
+    name: caddy
+    tasks_from: binary
+  when: caddy_version | default('') | length > 0
+
+- name: Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: /etc/caddy/Caddyfile
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "{{ '/usr/local/bin/caddy' if caddy_version | default('') else 'caddy' }} validate --config %s --adapter caddyfile"
+  notify: Reload caddy
+
+- name: Start Caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: started
+    enabled: true
+
+- name: Apply a pending Caddy reload
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait until Keycloak answers on https://{{ keycloak_hostname }}
+  ansible.builtin.uri:
+    url: "https://{{ keycloak_hostname }}/realms/master/.well-known/openid-configuration"
+    status_code: 200
+  register: keycloak_public
+  until: keycloak_public.status == 200
+  retries: 60
+  delay: 2
+  changed_when: false
+  check_mode: false          # read-only; needed for --check

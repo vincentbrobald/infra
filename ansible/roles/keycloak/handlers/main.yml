@@ -1,0 +1,25 @@
+---
+- name: Reload postgresql
+  ansible.builtin.systemd_service:
+    name: postgresql
+    state: reloaded
+
+# kc.sh build bakes the build-time options (db vendor, health, cache) into the
+# release; it has to run before a (re)start with --optimized.
+- name: Build keycloak
+  ansible.builtin.command: "{{ keycloak_home }}/bin/kc.sh build"
+  become_user: "{{ keycloak_user }}"
+  changed_when: true
+  notify: Restart keycloak
+
+- name: Restart keycloak
+  ansible.builtin.systemd_service:
+    name: keycloak
+    state: restarted
+    daemon_reload: true
+
+# Reload, not restart: keeps Caddy's certificates and connections.
+- name: Reload caddy
+  ansible.builtin.systemd_service:
+    name: caddy
+    state: reloaded

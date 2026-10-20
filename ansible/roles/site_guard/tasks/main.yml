@@ -1,0 +1,26 @@
+---
+# In --check, a VM libvirt_vm would create does not exist yet: nothing to
+# check on it.
+- name: Skip a VM that does not exist yet (--check)
+  ansible.builtin.meta: end_host
+  when: libvirt_vm_missing | default(false)
+
+# Facts here rather than at the start of the play, after the check above.
+- name: Gather facts
+  ansible.builtin.setup:
+
+# Inventories never hold credentials: keys and passwords come from files
+# (ansible_ssh_private_key_file, *_file variables, the secrets tree,
+# --become-password-file, --vault-password-file).
+- name: Refuse credentials written inline in the inventory
+  ansible.builtin.assert:
+    that: inline | length == 0
+    fail_msg: >-
+      {{ inline | join(', ') }} set inline for {{ inventory_hostname }}: use files instead
+      (ansible_ssh_private_key_file, the *_file variables, --become-password-file)
+    quiet: true
+  vars:
+    inline: >-
+      {{ ['ansible_password', 'ansible_ssh_pass', 'ansible_become_password', 'ansible_become_pass',
+          'ansible_sudo_pass', 'ansible_vault_password', 'keycloak_admin_password']
+         | select('in', hostvars[inventory_hostname]) | list }}

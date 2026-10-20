@@ -1,0 +1,111 @@
+---
+# The token's value: gitops (its Secret wins), else its file, else none yet.
+- name: Known value of token {{ token.name }}
+  ansible.builtin.set_fact:
+    forgejo_token: >-
+      {{ lookup('site_secret', token.file, topic=token.gitops.topic | default(None),
+                key=token.gitops.key | default(None), optional=true) }}
+  no_log: true
+
+# Forgejo can't change a token's scopes: when the inventory's differ, the
+# token is removed and restored below with the same value and the new scopes
+# (so whoever holds it, e.g. a cluster through gitops, keeps a valid token).
+- name: Tokens of {{ user.name }}
+  ansible.builtin.uri:
+    url: "{{ forgejo_api }}/users/{{ user.name }}/tokens"
+    url_username: "{{ user.name }}"
+    url_password: "{{ forgejo_user_password }}"
+    force_basic_auth: true
+  register: forgejo_user_tokens
+  when: forgejo_token | length > 0
+  check_mode: false
+  no_log: true
+
+- name: Remove token {{ token.name }}, whose scopes changed (restored with the new ones)
+  ansible.builtin.uri:
+    url: "{{ forgejo_api }}/users/{{ user.name }}/tokens/{{ token.name }}"
+    method: DELETE
+    url_username: "{{ user.name }}"
+    url_password: "{{ forgejo_user_password }}"
+    force_basic_auth: true
+    status_code: 204
+  vars:
+    found: "{{ forgejo_user_tokens.json | default([]) | selectattr('name', 'equalto', token.name) | list }}"
+  when:
+    - forgejo_token | length > 0
+    - found | length > 0
+    - found[0].scopes | sort != token.scopes | sort
+  changed_when: true
+
+- name: Check token {{ token.name }} of {{ user.name }}
+  ansible.builtin.uri:
+    url: "{{ forgejo_api }}/user"
+    headers: {Authorization: "token {{ forgejo_token }}"}
+    status_code: [200, 401, 403]
+  register: forgejo_token_check
+  when: forgejo_token | length > 0
+  check_mode: false              # read-only; needed for --check
+  no_log: true
+
+# A rebuilt server does not know a token that was handed out (to a cluster,
+# through gitops): put that same value back rather than a new one.
+# 401: unknown token. 403: a valid token without the read:user scope.
+- name: Restore token {{ token.name }} of {{ user.name }} with its known value
+  when: >-
+    forgejo_token | length > 0 and
+    (forgejo_token_check.status == 401 or
+     (forgejo_token_check.status == 200 and forgejo_token_check.json.login != user.name))
+  block:
+    - name: Write the token into Forgejo's database
+      ansible.builtin.command:
+        argv: [/usr/local/sbin/forgejo-import-token, "{{ forgejo_work_dir }}/data/forgejo.db", "{{ user.name }}",
+               "{{ token.name }}", "{{ token.scopes | join(',') }}"]
+        stdin: "{{ forgejo_token }}"
+      become_user: git
+      changed_when: true
+      no_log: true
+
+    - name: Check the restored token
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/user"
+        headers: {Authorization: "token {{ forgejo_token }}"}
+        status_code: [200, 403]
+      register: forgejo_token_restored
+      no_log: true
+
+- name: Create token {{ token.name }} of {{ user.name }}
+  when: forgejo_token | length == 0
+  block:
+    - name: Remove a token of that name Forgejo still has
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/users/{{ user.name }}/tokens/{{ token.name }}"
+        method: DELETE
+        url_username: "{{ user.name }}"
+        url_password: "{{ forgejo_user_password }}"
+        force_basic_auth: true
+        status_code: [204, 404]
+      register: forgejo_token_deleted
+      changed_when: forgejo_token_deleted.status == 204
+
+    - name: New token
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/users/{{ user.name }}/tokens"
+        method: POST
+        url_username: "{{ user.name }}"
+        url_password: "{{ forgejo_user_password }}"
+        force_basic_auth: true
+        body_format: json
+        body: {name: "{{ token.name }}", scopes: "{{ token.scopes }}"}
+        status_code: 201
+      register: forgejo_token_new
+      changed_when: true
+      no_log: true
+
+    - name: Write the token to {{ token.file }}
+      ansible.builtin.copy:
+        content: "{{ forgejo_token_new.json.sha1 }}\n"
+        dest: "{{ token.file if token.file is abs else site_secrets_dir ~ '/' ~ token.file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true

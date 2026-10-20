@@ -1,0 +1,30 @@
+---
+# zot, replaced by Harbor: stopped and removed (service,
+# binary, configuration with its credentials, its images and system user).
+- name: Stop and disable zot
+  ansible.builtin.systemd_service:
+    name: zot
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: Remove zot's service, binary and configuration
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/zot.service
+    - /usr/local/bin/zot
+    - /etc/zot
+    - /var/lib/zot
+  register: zot_removed
+
+- name: Remove zot's system user
+  ansible.builtin.user:
+    name: zot
+    state: absent
+
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: zot_removed.changed

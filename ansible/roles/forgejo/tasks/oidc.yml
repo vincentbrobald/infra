@@ -1,0 +1,19 @@
+---
+- name: Authentication sources
+  ansible.builtin.include_tasks: cli.yml
+  vars:
+    forgejo_cli: [admin, auth, list]
+    forgejo_cli_label: admin auth list
+    forgejo_cli_changed: false
+
+- name: Add the {{ forgejo_oidc.name }} source (OpenID Connect)
+  ansible.builtin.include_tasks: cli.yml
+  vars:
+    forgejo_cli: [admin, auth, add-oauth, --name, "{{ forgejo_oidc.name }}", --provider, openidConnect,
+                  --key, "{{ forgejo_oidc.client_id }}",
+                  --secret, "{{ lookup('site_secret', forgejo_oidc.secret_file) }}",
+                  --auto-discover-url, "{{ forgejo_oidc.issuer }}/.well-known/openid-configuration",
+                  --scopes, openid, --scopes, profile, --scopes, email]
+    forgejo_cli_label: admin auth add-oauth
+    forgejo_cli_no_log: true
+  when: forgejo_cli_out.stdout is not search('\\s' ~ forgejo_oidc.name ~ '\\s')

@@ -1,0 +1,77 @@
+---
+# The root file system uses the whole disk: its partition is grown, and with
+# LVM (Fedora Server's layout) the physical volume and the root logical
+# volume too. Nothing happens when there is no unused space.
+- name: Root file system of the guest
+  ansible.builtin.command: findmnt -no SOURCE,FSTYPE /
+  become: true
+  register: libvirt_vm_root
+  changed_when: false
+  check_mode: false              # read-only; needed for --check
+
+- name: Logical volume of the root (LVM only)
+  ansible.builtin.command: lvs --noheadings -o vg_name,lv_name {{ libvirt_vm_root.stdout.split()[0] }}
+  become: true
+  register: libvirt_vm_lv
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Partition holding the root
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    {% if libvirt_vm_lv.rc == 0 %}
+    readlink -f "$(pvs --noheadings -o pv_name -S vg_name={{ libvirt_vm_lv.stdout.split()[0] }} | head -1 | tr -d ' ')"
+    {% else %}
+    readlink -f {{ libvirt_vm_root.stdout.split()[0] }}
+    {% endif %}
+  become: true
+  register: libvirt_vm_part
+  changed_when: false
+  check_mode: false
+
+- name: growpart (cloud-utils-growpart; not in every image)
+  ansible.builtin.dnf:
+    name: cloud-utils-growpart
+    state: present
+  become: true
+
+# /dev/vda4 -> growpart /dev/vda 4; exit code 1 with NOCHANGE: already full size.
+- name: Grow the partition
+  ansible.builtin.command: >-
+    growpart {{ libvirt_vm_part.stdout | regex_replace('p?\d+$', '') }}
+    {{ libvirt_vm_part.stdout | regex_search('\d+$') }}
+  become: true
+  register: libvirt_vm_growpart
+  changed_when: libvirt_vm_growpart.rc == 0
+  failed_when: libvirt_vm_growpart.rc != 0 and 'NOCHANGE' not in libvirt_vm_growpart.stdout
+  when: not ansible_check_mode
+
+- name: Grow the file system (no LVM)
+  ansible.builtin.command: >-
+    {{ 'xfs_growfs /' if libvirt_vm_root.stdout.split()[1] == 'xfs'
+       else 'resize2fs ' ~ libvirt_vm_root.stdout.split()[0] }}
+  become: true
+  when: libvirt_vm_lv.rc != 0 and libvirt_vm_growpart is changed
+  changed_when: true
+
+- name: Grow the physical volume, then the root volume and its file system (LVM)
+  when: libvirt_vm_lv.rc == 0 and not ansible_check_mode
+  block:
+    - name: Resize the physical volume
+      ansible.builtin.command: pvresize {{ libvirt_vm_part.stdout }}
+      become: true
+      when: libvirt_vm_growpart is changed
+      changed_when: true
+
+    - name: Free space in the volume group
+      ansible.builtin.command: vgs --noheadings --units b --nosuffix -o vg_free {{ libvirt_vm_lv.stdout.split()[0] }}
+      become: true
+      register: libvirt_vm_vgfree
+      changed_when: false
+
+    - name: Grow the root volume and its file system
+      ansible.builtin.command: lvextend -r -l +100%FREE {{ libvirt_vm_lv.stdout.split() | join('/') }}
+      become: true
+      when: libvirt_vm_vgfree.stdout | trim | int > 4194304     # more than one extent
+      changed_when: true

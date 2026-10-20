@@ -1,0 +1,41 @@
+[Unit]
+Description=step-ca certificate authority ({{ step_ca_name }})
+Documentation=https://smallstep.com/docs/step-ca
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=30
+StartLimitBurst=3
+ConditionFileNotEmpty={{ step_ca_path }}/config/ca.json
+ConditionFileNotEmpty={{ step_ca_path }}/password.txt
+
+[Service]
+Type=simple
+User=step
+Group=step
+Environment=STEPPATH={{ step_ca_path }}
+WorkingDirectory={{ step_ca_path }}
+ExecStart={{ step_ca_bin }} config/ca.json --password-file password.txt
+ExecReload=/bin/kill --signal HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# Bind :443 without root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+SecureBits=keep-caps
+NoNewPrivileges=yes
+# Hardening
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths={{ step_ca_path }}/db
+
+[Install]
+WantedBy=multi-user.target

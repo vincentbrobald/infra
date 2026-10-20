@@ -1,0 +1,14 @@
+# cloud-init network configuration (v2): static address on the LAN NIC.
+version: 2
+ethernets:
+  lan:
+    match:
+      macaddress: "{{ libvirt_vm_mac }}"
+    addresses: ["{{ libvirt_vm_address }}/{{ libvirt_vm_prefix_length }}"]
+{% if libvirt_vm_gateway %}
+    routes:
+      - {to: 0.0.0.0/0, via: "{{ libvirt_vm_gateway }}"}   # cloud-init 24 rejects "default"
+{% endif %}
+    nameservers:
+      addresses: {{ libvirt_vm_nameservers | to_json }}
+      search: ["{{ site_domain }}"]

@@ -1,0 +1,186 @@
+---
+- name: Root credentials
+  ansible.builtin.set_fact:
+    rustfs_root_access_key: "{{ lookup('site_secret', rustfs_root_access_key_file, generate='hex:20') }}"
+    rustfs_root_secret_key: "{{ lookup('site_secret', rustfs_root_secret_key_file, generate='hex:20') }}"
+  no_log: true
+
+- name: Installed RustFS version
+  ansible.builtin.command: rpm -q --qf '%{VERSION}' rustfs
+  register: rustfs_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false          # read-only; needed for --check
+
+- name: Install RustFS {{ rustfs_version }}
+  when: rustfs_installed.stdout != rustfs_version
+  vars:
+    rpm: "rustfs-linux-x86_64-gnu-v{{ rustfs_version }}.rpm"
+    base: "https://github.com/rustfs/rustfs/releases/download/{{ rustfs_version }}"
+  block:
+    - name: Download the RPM (checked against the release's SHA256SUMS)
+      ansible.builtin.get_url:
+        url: "{{ base }}/{{ rpm }}"
+        dest: "/tmp/{{ rpm }}"
+        checksum: "sha256:{{ base }}/SHA256SUMS"
+        mode: "0600"
+
+    - name: Install the RPM
+      ansible.builtin.dnf:
+        name: "/tmp/{{ rpm }}"
+        state: present
+        disable_gpg_check: true    # unsigned; verified by checksum above
+      notify: Restart rustfs
+
+    - name: Remove the RPM
+      ansible.builtin.file:
+        path: "/tmp/{{ rpm }}"
+        state: absent
+
+- name: Installed rc version
+  ansible.builtin.shell: set -o pipefail; /usr/local/bin/rc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+  register: rustfs_rc_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install rc {{ rustfs_rc_version }}
+  when: rustfs_rc_installed.stdout != rustfs_rc_version
+  vars:
+    tarball: "rustfs-cli-linux-amd64-gnu-v{{ rustfs_rc_version }}.tar.gz"
+    base: "https://github.com/rustfs/cli/releases/download/v{{ rustfs_rc_version }}"
+  block:
+    - name: Download rc (checked against its .sha256)
+      ansible.builtin.get_url:
+        url: "{{ base }}/{{ tarball }}"
+        dest: "/tmp/{{ tarball }}"
+        checksum: "sha256:{{ base }}/{{ tarball }}.sha256"
+        mode: "0600"
+
+    - name: Unpack rc
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ tarball }}"
+        dest: /tmp
+        remote_src: true
+        list_files: true
+      register: rustfs_rc_files
+
+    - name: Install /usr/local/bin/rc
+      ansible.builtin.copy:
+        src: "/tmp/{{ rustfs_rc_files.files | select('match', '(.*/)?rc$') | first }}"
+        dest: /usr/local/bin/rc
+        remote_src: true
+        mode: "0755"
+
+    - name: Remove the download
+      ansible.builtin.file:
+        path: "/tmp/{{ item }}"
+        state: absent
+      loop: "{{ [tarball] + rustfs_rc_files.files | map('regex_replace', '/.*$', '') | unique }}"
+
+- name: Configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop: ["{{ rustfs_conf }}", "{{ rustfs_conf }}/users", /root/.config/rc]
+
+# The root keys also as files, for administration on the host.
+- name: Root credential files
+  ansible.builtin.copy:
+    content: "{{ item.value }}\n"
+    dest: "{{ rustfs_conf }}/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0600"
+  loop:
+    - {name: root-access-key, value: "{{ rustfs_root_access_key }}"}
+    - {name: root-secret-key, value: "{{ rustfs_root_secret_key }}"}
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+- name: RustFS settings (listening on localhost only)
+  ansible.builtin.template:
+    src: rustfs.env.j2
+    dest: /etc/default/rustfs
+    owner: root
+    group: root
+    mode: "0600"               # holds the root keys
+  notify: Restart rustfs
+  no_log: true
+
+- name: rc alias "local" (root keys)
+  ansible.builtin.template:
+    src: rc-config.toml.j2
+    dest: /root/.config/rc/config.toml
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Apply a pending restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Start RustFS
+  ansible.builtin.systemd_service:
+    name: rustfs
+    state: started
+    enabled: true
+
+- name: Caddy
+  ansible.builtin.include_role:
+    name: caddy
+  vars:
+    caddy_sites: |
+      # S3 API. Caddy keeps the Host header, which S3 request signatures cover.
+      {{ rustfs_hostname }} {
+      	request_body {
+      		max_size 5GB
+      	}
+      	reverse_proxy 127.0.0.1:9000
+      }
+
+      # Web console.
+      {{ rustfs_hostname }}:9443 {
+      	reverse_proxy 127.0.0.1:9001
+      }
+
+- name: Wait until RustFS answers on https://{{ rustfs_hostname }}
+  ansible.builtin.uri:
+    url: "https://{{ rustfs_hostname }}/health"
+  register: rustfs_health
+  until: rustfs_health.status == 200
+  retries: 60
+  delay: 5
+  check_mode: false
+
+- name: Credential check helper
+  ansible.builtin.copy:
+    src: s3-auth-check
+    dest: /usr/local/sbin/s3-auth-check
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Existing buckets
+  ansible.builtin.command: /usr/local/bin/rc ls local/ --json
+  register: rustfs_ls
+  changed_when: false
+  check_mode: false
+
+- name: Buckets
+  ansible.builtin.include_tasks: bucket.yml
+  loop: "{{ rustfs_buckets }}"
+  loop_control:
+    loop_var: bucket
+    label: "{{ bucket.name }}"
+
+- name: Users
+  ansible.builtin.include_tasks: user.yml
+  loop: "{{ rustfs_users }}"
+  loop_control:
+    loop_var: user
+    label: "{{ user.access_key }}"

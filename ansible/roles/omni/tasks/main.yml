@@ -1,0 +1,189 @@
+---
+- name: Packages (Podman runs Omni; GnuPG makes its etcd key)
+  ansible.builtin.dnf:
+    name: [podman, gnupg2]
+    state: present
+
+# WireGuard's userspace code (SideroLink) watches its control socket; the
+# container policy forbids inotify watches on socket files, and the denial
+# is silent (dontaudit): Omni then exits with "error listening on uapi
+# socket: permission denied". One rule allows exactly that.
+- name: SELinux rule for Omni's WireGuard socket
+  ansible.builtin.copy:
+    dest: /etc/selinux/omni_wireguard.cil
+    content: |
+      ; Omni (SideroLink WireGuard) watches its UAPI socket inside its container.
+      (allow container_t container_file_t (sock_file (watch)))
+    owner: root
+    group: root
+    mode: "0644"
+  register: omni_selinux_rule
+
+- name: Load the SELinux rule
+  ansible.builtin.command: semodule -i /etc/selinux/omni_wireguard.cil
+  when: omni_selinux_rule.changed
+  notify: Restart omni
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ omni_data_dir }}", mode: "0700"}
+    - {path: "{{ omni_data_dir }}/sqlite", mode: "0700"}
+    - {path: "{{ omni_config_dir }}", mode: "0700"}
+
+- name: Account id and OIDC client secret
+  ansible.builtin.set_fact:
+    # A UUID made of 16 random bytes, generated once into the secrets tree.
+    omni_account_id: >-
+      {%- set h = lookup('site_secret', omni_account_id_file, generate='hex:16') -%}
+      {{ h[0:8] }}-{{ h[8:12] }}-{{ h[12:16] }}-{{ h[16:20] }}-{{ h[20:32] }}
+    omni_oidc_client_secret: "{{ lookup('site_secret', omni_oidc_client_secret_file) }}"
+  no_log: true
+
+# The GPG key encrypting Omni's etcd: from the secrets tree when it is there
+# (a rebuilt VM reads its old data), else made once here and kept there.
+- name: Etcd encryption key in the secrets tree
+  ansible.builtin.stat:
+    path: "{{ site_secrets_dir }}/{{ omni_gpg_key_file }}"
+  delegate_to: localhost
+  become: false
+  register: omni_gpg_saved
+
+- name: Etcd encryption key on the VM
+  ansible.builtin.stat:
+    path: "{{ omni_config_dir }}/omni.asc"
+  register: omni_gpg_vm
+
+- name: Install the saved etcd encryption key
+  ansible.builtin.copy:
+    src: "{{ site_secrets_dir }}/{{ omni_gpg_key_file }}"
+    dest: "{{ omni_config_dir }}/omni.asc"
+    owner: root
+    group: root
+    mode: "0600"
+  when: omni_gpg_saved.stat.exists
+  notify: Restart omni
+
+- name: Make the etcd encryption key (no passphrase, as Omni requires)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export GNUPGHOME=$(mktemp -d)
+    trap 'rm -rf "$GNUPGHOME"' EXIT
+    uid="Omni (etcd data encryption) omni@{{ site_domain }}"
+    gpg --batch --passphrase '' --quick-generate-key "$uid" rsa4096 cert never
+    fpr=$(gpg --with-colons --list-keys "omni@{{ site_domain }}" | awk -F: '$1 == "fpr" {print $10; exit}')
+    gpg --batch --passphrase '' --quick-add-key "$fpr" rsa4096 encr never
+    umask 077
+    gpg --export-secret-key --armor "omni@{{ site_domain }}" > {{ omni_config_dir }}/omni.asc
+  args:
+    creates: "{{ omni_config_dir }}/omni.asc"
+    executable: /bin/bash
+  when: not omni_gpg_saved.stat.exists and not omni_gpg_vm.stat.exists
+  notify: Restart omni
+
+- name: Keep the etcd encryption key in the secrets tree
+  ansible.builtin.fetch:
+    src: "{{ omni_config_dir }}/omni.asc"
+    dest: "{{ site_secrets_dir }}/{{ omni_gpg_key_file }}"
+    flat: true
+  when: not omni_gpg_saved.stat.exists
+
+- name: Protect the saved etcd encryption key
+  ansible.builtin.file:
+    path: "{{ site_secrets_dir }}/{{ omni_gpg_key_file }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not omni_gpg_saved.stat.exists and not ansible_check_mode
+
+- name: Settings that are secrets
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ omni_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart omni
+
+- name: Container unit (quadlet)
+  ansible.builtin.template:
+    src: omni.container.j2
+    dest: /etc/containers/systemd/omni.container
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart omni
+
+- name: Pull the Omni image
+  ansible.builtin.command: podman pull --quiet {{ omni_image }}
+  register: omni_pull
+  changed_when: false
+
+- name: Omni service
+  ansible.builtin.systemd_service:
+    name: omni
+    state: started
+    daemon_reload: true
+
+- name: Restart now if settings changed (the API must answer below)
+  ansible.builtin.meta: flush_handlers
+
+- name: Caddy
+  ansible.builtin.include_role:
+    name: caddy
+  vars:
+    caddy_sites: |
+      # UI and API (gRPC, gRPC-Web, HTTP): Omni speaks HTTP/2 without TLS behind Caddy.
+      {{ omni_hostname }} {
+      	reverse_proxy h2c://127.0.0.1:{{ omni_api_port }} {
+      		flush_interval -1
+      	}
+      }
+      # SideroLink API: Talos nodes join here (gRPC).
+      {{ omni_hostname }}:8090 {
+      	reverse_proxy h2c://127.0.0.1:{{ omni_machine_api_port }} {
+      		flush_interval -1
+      	}
+      }
+      # Kubernetes API proxy (kubectl through Omni).
+      {{ omni_hostname }}:8100 {
+      	reverse_proxy 127.0.0.1:{{ omni_k8s_proxy_port }} {
+      		flush_interval -1
+      	}
+      }
+
+- name: Wait until Omni answers on https://{{ omni_hostname }}/
+  ansible.builtin.uri:
+    url: "https://{{ omni_hostname }}/healthz"
+    status_code: 200
+  register: omni_health
+  until: omni_health.status == 200
+  retries: 60
+  delay: 5
+  check_mode: false
+
+- name: Initial service account key (written by Omni on its first start)
+  ansible.builtin.stat:
+    path: "{{ omni_data_dir }}/initial-service-account-key"
+  register: omni_sa
+
+- name: Keep the service account key in the secrets tree
+  ansible.builtin.fetch:
+    src: "{{ omni_data_dir }}/initial-service-account-key"
+    dest: "{{ site_secrets_dir }}/{{ omni_service_account_key_file }}"
+    flat: true
+  when: omni_sa.stat.exists
+
+- name: Protect the saved service account key
+  ansible.builtin.file:
+    path: "{{ site_secrets_dir }}/{{ omni_service_account_key_file }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: omni_sa.stat.exists and not ansible_check_mode

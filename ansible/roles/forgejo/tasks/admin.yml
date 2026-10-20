@@ -1,0 +1,56 @@
+---
+- name: Admin password
+  ansible.builtin.set_fact:
+    forgejo_admin_password: "{{ lookup('site_secret', forgejo_admin.password_file, generate='alnum:24') }}"
+  no_log: true
+
+- name: Log in as {{ forgejo_admin.name }}
+  ansible.builtin.uri:
+    url: "{{ forgejo_api }}/user"
+    url_username: "{{ forgejo_admin.name }}"
+    url_password: "{{ forgejo_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 401]
+  register: forgejo_admin_login
+  check_mode: false              # read-only; needed for --check
+
+- name: Set up {{ forgejo_admin.name }}
+  when: forgejo_admin_login.status == 401
+  block:
+    - name: List the admins
+      ansible.builtin.include_tasks: cli.yml
+      vars:
+        forgejo_cli: [admin, user, list, --admin]
+        forgejo_cli_label: admin user list
+        forgejo_cli_changed: false
+
+    - name: Remember the admins
+      ansible.builtin.set_fact:
+        forgejo_admins: "{{ forgejo_cli_out.stdout }}"
+
+    - name: Reset the password of {{ forgejo_admin.name }}
+      ansible.builtin.include_tasks: cli.yml
+      vars:
+        forgejo_cli: [admin, user, change-password, --username, "{{ forgejo_admin.name }}",
+                      --password, "{{ forgejo_admin_password }}", --must-change-password=false]
+        forgejo_cli_label: admin user change-password
+        forgejo_cli_no_log: true
+      when: forgejo_admins is search('\\s' ~ forgejo_admin.name ~ '\\s')
+
+    - name: Create {{ forgejo_admin.name }}
+      ansible.builtin.include_tasks: cli.yml
+      vars:
+        forgejo_cli: [admin, user, create, --admin, --username, "{{ forgejo_admin.name }}",
+                      --email, "{{ forgejo_admin.email }}", --password, "{{ forgejo_admin_password }}",
+                      --must-change-password=false]
+        forgejo_cli_label: admin user create
+        forgejo_cli_no_log: true
+      when: forgejo_admins is not search('\\s' ~ forgejo_admin.name ~ '\\s')
+
+- name: Admin credentials for the API
+  ansible.builtin.set_fact:
+    forgejo_as_admin:
+      url_username: "{{ forgejo_admin.name }}"
+      url_password: "{{ forgejo_admin_password }}"
+      force_basic_auth: true
+  no_log: true

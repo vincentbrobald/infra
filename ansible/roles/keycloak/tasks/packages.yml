@@ -1,0 +1,20 @@
+---
+- name: Install Java, PostgreSQL and tools
+  ansible.builtin.dnf:
+    name:
+      - dnf-plugins-core
+      - "{{ keycloak_java_package }}"
+      - postgresql-server
+      - tar
+      - openssl
+    state: present
+
+- name: Enable the Caddy COPR repository
+  ansible.builtin.command: "dnf -y copr enable {{ keycloak_caddy_copr }}"
+  args:
+    creates: "/etc/yum.repos.d/_copr:copr.fedorainfracloud.org:{{ keycloak_caddy_copr | regex_replace('^@', 'group_') | replace('/', ':') }}.repo"
+
+- name: Install Caddy
+  ansible.builtin.dnf:
+    name: caddy
+    state: present

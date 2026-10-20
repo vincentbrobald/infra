@@ -1,0 +1,6 @@
+---
+- name: Restart artifact-keeper
+  ansible.builtin.systemd_service:
+    name: artifact-keeper
+    state: restarted
+    daemon_reload: true

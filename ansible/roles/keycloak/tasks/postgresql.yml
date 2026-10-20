@@ -1,0 +1,85 @@
+---
+- name: Initialise the PostgreSQL data directory
+  ansible.builtin.command: postgresql-setup --initdb
+  args:
+    creates: /var/lib/pgsql/data/PG_VERSION
+
+- name: Password (scram) logins over localhost
+  ansible.builtin.replace:
+    path: /var/lib/pgsql/data/pg_hba.conf
+    regexp: '^(host\s+all\s+all\s+(127\.0\.0\.1/32|::1/128)\s+)ident$'
+    replace: '\1scram-sha-256'
+  notify: Reload postgresql
+
+- name: Start PostgreSQL
+  ansible.builtin.systemd_service:
+    name: postgresql
+    state: started
+    enabled: true
+
+- name: Flush handlers (pg_hba.conf)
+  ansible.builtin.meta: flush_handlers
+
+- name: Configuration directory
+  ansible.builtin.file:
+    path: /etc/keycloak
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Generate the database password (first run)
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    openssl rand -base64 30 | tr -dc 'A-Za-z0-9' | head -c 32 > {{ keycloak_db_password_file }}
+  args:
+    creates: "{{ keycloak_db_password_file }}"
+
+- name: Read the database password
+  ansible.builtin.slurp:
+    src: "{{ keycloak_db_password_file }}"
+  register: keycloak_db_password_raw
+  no_log: true
+
+- name: Remember the database password
+  ansible.builtin.set_fact:
+    keycloak_db_password: "{{ keycloak_db_password_raw.content | b64decode | trim }}"
+  no_log: true
+
+- name: Check for the database role
+  ansible.builtin.command: >-
+    psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '{{ keycloak_db_user }}'"
+  become_user: postgres
+  register: keycloak_db_role
+  changed_when: false
+  check_mode: false          # read-only; needed for --check
+
+- name: Create the database role
+  ansible.builtin.command: psql -v ON_ERROR_STOP=1 -c "CREATE ROLE {{ keycloak_db_user }} LOGIN"
+  become_user: postgres
+  when: keycloak_db_role.stdout != "1"
+  changed_when: true
+
+- name: Set the database role's password
+  ansible.builtin.command:
+    cmd: psql -v ON_ERROR_STOP=1 -v pw="{{ keycloak_db_password }}" -f -
+    stdin: "ALTER ROLE {{ keycloak_db_user }} PASSWORD :'pw';"
+  become_user: postgres
+  changed_when: false        # same password every run; not a change
+  no_log: true
+
+- name: Check for the database
+  ansible.builtin.command: >-
+    psql -tAc "SELECT 1 FROM pg_database WHERE datname = '{{ keycloak_db_name }}'"
+  become_user: postgres
+  register: keycloak_db
+  changed_when: false
+  check_mode: false          # read-only; needed for --check
+
+- name: Create the database
+  ansible.builtin.command: >-
+    psql -v ON_ERROR_STOP=1 -c "CREATE DATABASE {{ keycloak_db_name }} OWNER {{ keycloak_db_user }}"
+  become_user: postgres
+  when: keycloak_db.stdout != "1"
+  changed_when: true

@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+{% if keycloak_acme_ca or keycloak_acme_email %}
+{
+{% if keycloak_acme_email %}
+	email {{ keycloak_acme_email }}
+{% endif %}
+{% if keycloak_acme_ca %}
+	acme_ca {{ keycloak_acme_ca }}
+{% endif %}
+{% if keycloak_ca_cert_src %}
+	acme_ca_root /etc/pki/ca-trust/source/anchors/{{ keycloak_ca_cert_name }}
+{% endif %}
+}
+
+{% endif %}
+{{ keycloak_hostname }} {
+	reverse_proxy 127.0.0.1:{{ keycloak_http_port }}
+}

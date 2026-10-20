@@ -1,0 +1,14 @@
+---
+# Runs "forgejo <forgejo_cli>" as git (admin commands).
+- name: forgejo {{ forgejo_cli_label }}
+  ansible.builtin.command:
+    argv: "{{ ['/usr/local/bin/forgejo'] + forgejo_cli + ['--config', '/etc/forgejo/app.ini'] }}"
+  become_user: git
+  environment:
+    FORGEJO_WORK_DIR: "{{ forgejo_work_dir }}"
+    HOME: "{{ forgejo_work_dir }}"
+  register: forgejo_cli_out
+  changed_when: forgejo_cli_changed | default(true)
+  # Read-only commands also run in --check; the others follow the run.
+  check_mode: "{{ (forgejo_cli_changed | default(true)) and ansible_check_mode }}"
+  no_log: "{{ forgejo_cli_no_log | default(false) }}"

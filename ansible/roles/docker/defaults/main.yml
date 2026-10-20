@@ -1,0 +1,7 @@
+---
+# Docker Engine and its compose plugin from Docker's repository for RHEL 10
+# (Apache-2.0), for services shipped as docker compose (roles harbor,
+# artifact_keeper). Published ports bind to 127.0.0.1 (Caddy in front);
+# firewall rules as nftables.
+docker_ce_version: 29.8.2          # 2026-09-30
+docker_compose_version: 5.6.0      # 2026-10-02

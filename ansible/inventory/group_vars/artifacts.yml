@@ -1,0 +1,8 @@
+---
+# Artifact Keeper on artifacts (role artifact_keeper; see
+# roles/artifact_keeper/defaults/main.yml).
+artifact_keeper_hostname: "{{ inventory_hostname }}"
+# DNS: the VM's name as a host entry on the router (a host entry replaces
+# the name of the VM's DHCP lease, so both must agree; see
+# docs/explanation/dns-registration.md).
+artifact_keeper_dns_records: ["{{ inventory_hostname }}"]

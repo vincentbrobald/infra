@@ -1,0 +1,146 @@
+---
+- name: Credentials
+  ansible.builtin.set_fact:
+    harbor_admin_password: >-
+      {{ lookup('site_secret', harbor_admin_password_file, topic=harbor_admin_password_gitops.topic | default(None),
+                key=harbor_admin_password_gitops.key | default(None), generate='alnum:32') }}
+    harbor_db_password: "{{ lookup('site_secret', harbor_db_password_file, generate='alnum:32') }}"
+  no_log: true
+
+# Docker Engine and compose (role docker): Harbor's installer runs on them.
+- name: Docker
+  ansible.builtin.include_role:
+    name: docker
+
+- name: Harbor {{ harbor_version }} installer (checked against the release's md5sum)
+  ansible.builtin.get_url:
+    url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/harbor-online-installer-{{ harbor_version }}.tgz"
+    dest: "/opt/harbor-online-installer-{{ harbor_version }}.tgz"
+    checksum: "md5:{{ harbor_installer_md5 }}"
+    mode: "0644"
+
+- name: Installer directory /opt/harbor-{{ harbor_version }}
+  ansible.builtin.file:
+    path: "/opt/harbor-{{ harbor_version }}"
+    state: directory
+    mode: "0750"
+
+- name: Unpack the installer
+  ansible.builtin.unarchive:
+    src: "/opt/harbor-online-installer-{{ harbor_version }}.tgz"
+    dest: "/opt/harbor-{{ harbor_version }}"
+    remote_src: true
+    extra_opts: [--strip-components=1]
+    creates: "/opt/harbor-{{ harbor_version }}/prepare"
+
+- name: "{{ harbor_dir }} -> /opt/harbor-{{ harbor_version }}"
+  ansible.builtin.file:
+    src: "/opt/harbor-{{ harbor_version }}"
+    dest: "{{ harbor_dir }}"
+    state: link
+  register: harbor_link
+
+- name: Data and log directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: ["{{ harbor_data_dir }}", "{{ harbor_log_dir }}"]
+
+- name: harbor.yml
+  ansible.builtin.template:
+    src: harbor.yml.j2
+    dest: "{{ harbor_dir }}/harbor.yml"
+    owner: root
+    group: root
+    mode: "0600"
+  register: harbor_yml
+  no_log: true
+
+- name: Generated docker-compose.yml
+  ansible.builtin.stat:
+    path: "{{ harbor_dir }}/docker-compose.yml"
+  register: harbor_compose
+
+# prepare (a container of Harbor's) writes docker-compose.yml and the
+# components' configuration from harbor.yml.
+- name: Prepare Harbor's configuration
+  ansible.builtin.command:
+    cmd: ./prepare --with-trivy
+    chdir: "{{ harbor_dir }}"
+  when: harbor_yml.changed or harbor_link.changed or not harbor_compose.stat.exists
+  changed_when: true
+  notify: Restart harbor
+
+# prepare publishes nginx on every address ("8080:8080", which Docker's
+# loopback default doesn't cover): bind it to loopback, Caddy is the way in.
+- name: Harbor's HTTP port on loopback only
+  ansible.builtin.replace:
+    path: "{{ harbor_dir }}/docker-compose.yml"
+    regexp: '^(\s+- )(?:0\.0\.0\.0:)?{{ harbor_http_port }}:8080$'
+    replace: '\g<1>127.0.0.1:{{ harbor_http_port }}:8080'
+  notify: Restart harbor
+
+# The site's CA in Harbor's containers (they add the certificates found in
+# trust-certificates to their trust store at start): Keycloak (OIDC login)
+# and the site's other services have certificates from it.
+- name: Site CA trusted by Harbor's containers
+  ansible.builtin.copy:
+    src: "{{ site_ca_anchor }}"
+    remote_src: true
+    dest: "{{ harbor_dir }}/common/config/shared/trust-certificates/site-root-ca.crt"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart harbor
+
+- name: harbor systemd service
+  ansible.builtin.template:
+    src: harbor.service.j2
+    dest: /etc/systemd/system/harbor.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart harbor
+
+- name: Start Harbor
+  ansible.builtin.systemd_service:
+    name: harbor
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Apply a pending Harbor restart
+  ansible.builtin.meta: flush_handlers
+
+- name: DNS records {{ harbor_dns_records | join(', ') }} -> this VM
+  ansible.builtin.command:
+    cmd: "{{ site_dns_tool }} sync {{ '--dry-run' if ansible_check_mode else '' }}"
+    stdin: >-
+      {%- set records = [] -%}
+      {%- for n in harbor_dns_records -%}
+      {%- set _ = records.append({'name': n, 'type': 'A', 'address': ansible_default_ipv4.address}) -%}
+      {%- endfor -%}
+      {{ {'owner': 'infra-ansible:harbor', 'records': records} | to_json }}
+  delegate_to: localhost
+  become: false
+  register: harbor_dns
+  changed_when: harbor_dns.stdout is search('(?m)^\s+(add|update|delete)\s')
+  check_mode: false
+  when: harbor_dns_records | length > 0
+
+- name: Caddy
+  ansible.builtin.include_role:
+    name: caddy
+  vars:
+    caddy_sites: "{{ harbor_caddy_sites }}"
+
+- name: Wait until Harbor answers on https://{{ harbor_hostname }}/api/v2.0/ping
+  ansible.builtin.uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/ping"
+    return_content: true
+  register: harbor_ping
+  until: harbor_ping.status == 200 and harbor_ping.content == 'Pong'
+  retries: 60
+  delay: 5
+  check_mode: false

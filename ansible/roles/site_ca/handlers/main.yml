@@ -1,0 +1,4 @@
+---
+- name: Update the system trust store
+  ansible.builtin.command: update-ca-trust
+  changed_when: true

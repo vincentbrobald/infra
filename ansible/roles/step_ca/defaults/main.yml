@@ -1,0 +1,16 @@
+---
+# step-ca certificate authority: root + intermediate, ACME and JWK
+# provisioners, the intermediate name-constrained to step_ca_domain.
+step_ca_name: "{{ site_domain }} CA"
+step_ca_dns: "{{ inventory_hostname }}"
+step_ca_domain: "{{ site_domain }}"
+step_ca_admin: "admin@{{ site_domain }}"     # JWK provisioner (manual issuance)
+step_ca_path: /etc/step-ca
+step_ca_bin: /bin/step-ca
+
+# Backups of {{ step_ca_path }} (tar.gz of "step-ca/" relative to /etc) on
+# the controller. A host without a CA is restored from the newest one, so
+# the root stays; a new CA is only created when there is none. After a new
+# CA, a restore or a re-issued intermediate, a new backup is written there.
+step_ca_backup_dir: "{{ site_secrets_dir }}/pki/backup"
+step_ca_restore: true

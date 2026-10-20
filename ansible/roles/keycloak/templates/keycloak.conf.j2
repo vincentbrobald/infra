@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+db=postgres
+db-url=jdbc:postgresql://127.0.0.1:5432/{{ keycloak_db_name }}
+db-username={{ keycloak_db_user }}
+db-password={{ keycloak_db_password }}
+hostname=https://{{ keycloak_hostname }}
+http-enabled=true
+http-host=127.0.0.1
+http-port={{ keycloak_http_port }}
+# Caddy on the same host terminates TLS and sets X-Forwarded-*.
+proxy-headers=xforwarded
+proxy-trusted-addresses=127.0.0.1
+health-enabled=true
+http-management-port={{ keycloak_management_port }}
+# Single node: no Infinispan/JGroups cluster (which would listen on the LAN).
+cache=local

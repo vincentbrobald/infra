@@ -1,0 +1,32 @@
+---
+# A VM on this host (libvirt), AlmaLinux 10 configured by cloud-init: its
+# address by DHCP on libvirt_vm_bridge, its host name announced so that a
+# router registering DHCP names makes it resolvable. Login by SSH key only
+# (ansible_user, passwordless sudo); the key pair is created in the directory
+# of ansible_ssh_private_key_file when missing.
+#
+# Per host, from the inventory: vm.name, vm.memory (MiB), vm.vcpus,
+# vm.disk (e.g. 20G), vm.mac (default: derived from the host name, so a
+# re-created VM gets the same DHCP lease and name).
+libvirt_vm_uri: qemu:///system
+libvirt_vm_bridge: "{{ site_vm_bridge | default('bridge0') }}"
+libvirt_vm_images_dir: /var/lib/libvirt/images
+libvirt_vm_cache_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/alma10"
+libvirt_vm_key_dir: "{{ ansible_ssh_private_key_file | dirname }}"
+
+# Addressing (vm.network): dhcp, or static with vm.address. A static VM's
+# name is registered on the router (dnsmasq host entry) with
+# libvirt_vm_dns_tool under owner infra-ansible:<vm.name>, kept in line on
+# every run. The mode applies when the VM is created.
+libvirt_vm_network: "{{ vm.network | default(site_vm_network | default('dhcp')) }}"
+libvirt_vm_address: "{{ vm.address | default('') }}"
+libvirt_vm_prefix_length: "{{ vm.prefix_length | default(site_vm_prefix_length | default(24)) }}"
+libvirt_vm_gateway: "{{ vm.gateway | default(site_vm_gateway | default('')) }}"
+libvirt_vm_nameservers: "{{ vm.nameservers | default(site_vm_nameservers | default([])) }}"
+libvirt_vm_dns_tool: "{{ site_dns_tool | default(playbook_dir | dirname ~ '/dns/opnsense-dns.py') }}"
+
+# AlmaLinux 10 GenericCloud image, checked against the GPG-signed CHECKSUM
+# with the pinned key "AlmaLinux OS 10" (https://almalinux.org/security/).
+libvirt_vm_alma_base: https://repo.almalinux.org/almalinux/10/cloud/x86_64/images
+libvirt_vm_alma_key_url: https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux-10
+libvirt_vm_alma_key_fpr: EE6DB7B98F5BF5EDD9DA0DE5DEE5C11CC2A1E572

@@ -1,0 +1,33 @@
+---
+- name: Key of {{ deploy_key.title }}
+  ansible.builtin.set_fact:
+    forgejo_key: "{{ (lookup('ansible.builtin.file', deploy_key.key_file).split())[:2] | join(' ') }}"
+    forgejo_key_found: >-
+      {{ forgejo_keys.json | selectattr('key', 'search', '^' ~ ((lookup('ansible.builtin.file', deploy_key.key_file).split())[:2]
+         | join(' ') | regex_escape)) | list }}
+
+- name: Remove {{ deploy_key.title }} (other access level)
+  ansible.builtin.uri:
+    url: "{{ r }}/keys/{{ item.id }}"
+    method: DELETE
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    status_code: 204
+  loop: "{{ forgejo_key_found | rejectattr('read_only', 'equalto', deploy_key.read_only | default(true)) | list }}"
+  loop_control:
+    label: "{{ item.title }}"
+  changed_when: true
+
+- name: Add {{ deploy_key.title }}
+  ansible.builtin.uri:
+    url: "{{ r }}/keys"
+    method: POST
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    body_format: json
+    body: {title: "{{ deploy_key.title }}", key: "{{ forgejo_key }}", read_only: "{{ deploy_key.read_only | default(true) }}"}
+    status_code: 201
+  when: forgejo_key_found | selectattr('read_only', 'equalto', deploy_key.read_only | default(true)) | list | length == 0
+  changed_when: true

@@ -1,0 +1,86 @@
+---
+# The secret: gitops (its Secret wins), else its file, else generated.
+# Forgejo never shows a webhook's secret and its API ignores a new one on
+# edit: the hook is created with it, and a hash of what was set is kept in
+# /etc/forgejo/webhooks/. A different secret (or no record) means the hook is
+# deleted and created again.
+- name: Secret of webhook {{ hook.url }}
+  ansible.builtin.set_fact:
+    forgejo_hook_secret: >-
+      {{ lookup('site_secret', hook.secret_file, topic=hook.gitops.topic | default(None),
+                key=hook.gitops.key | default(None), generate='hex:32') }}
+    forgejo_hook: "{{ forgejo_hooks.json | selectattr('config.url', 'equalto', hook.url) | first | default({}) }}"
+    forgejo_hook_record: "/etc/forgejo/webhooks/{{ repo.owner }}_{{ repo.name }}_{{ hook.url | hash('sha1') }}"
+  no_log: true
+
+- name: Record of the secret set on webhook {{ hook.url }}
+  ansible.builtin.slurp:
+    src: "{{ forgejo_hook_record }}"
+  register: forgejo_hook_set
+  failed_when: false
+
+- name: Compare with the secret wanted
+  ansible.builtin.set_fact:
+    forgejo_hook_digest: "{{ (forgejo_hook_secret ~ hook.url) | hash('sha256') }}"
+    forgejo_hook_current: >-
+      {{ forgejo_hook | length > 0 and forgejo_hook_set.content is defined
+         and (forgejo_hook_set.content | b64decode | trim) == (forgejo_hook_secret ~ hook.url) | hash('sha256') }}
+  no_log: true
+
+- name: Delete webhook {{ hook.url }} (its secret changes)
+  ansible.builtin.uri:
+    url: "{{ r }}/hooks/{{ forgejo_hook.id }}"
+    method: DELETE
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    status_code: 204
+  when: forgejo_hook | length > 0 and not forgejo_hook_current
+  changed_when: true
+
+- name: Create webhook {{ hook.url }}
+  ansible.builtin.uri:
+    url: "{{ r }}/hooks"
+    method: POST
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      type: "{{ hook.type | default('forgejo') }}"
+      config: {url: "{{ hook.url }}", content_type: json, secret: "{{ forgejo_hook_secret }}"}
+      events: "{{ hook.events }}"
+      branch_filter: "{{ hook.branch_filter | default('*') }}"
+      active: true
+    status_code: 201
+  when: not forgejo_hook_current
+  changed_when: true
+  no_log: true
+
+- name: Record the secret set on webhook {{ hook.url }}
+  ansible.builtin.copy:
+    content: "{{ forgejo_hook_digest }}\n"
+    dest: "{{ forgejo_hook_record }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Update webhook {{ hook.url }} (events, branches, state)
+  ansible.builtin.uri:
+    url: "{{ r }}/hooks/{{ forgejo_hook.id }}"
+    method: PATCH
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      config: {url: "{{ hook.url }}", content_type: json}
+      events: "{{ hook.events }}"
+      branch_filter: "{{ hook.branch_filter | default('*') }}"
+      active: true
+    status_code: 200
+  when: >-
+    forgejo_hook_current and
+    (forgejo_hook.events | sort != hook.events | sort or not forgejo_hook.active
+     or forgejo_hook.branch_filter != hook.branch_filter | default('*'))
+  changed_when: true

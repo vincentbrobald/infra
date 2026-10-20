@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Prints "valid" when the S3 credentials on stdin ("access-key secret-key")
+# authenticate against the local RustFS, "invalid" otherwise. A valid key
+# without permission to list gets AccessDenied, which still counts as valid.
+set -euo pipefail
+read -r ak sk
+body=$(printf 'user = "%s:%s"\n' "$ak" "$sk" | curl -s -K - --aws-sigv4 'aws:amz:us-east-1:s3' http://127.0.0.1:9000/)
+if grep -qE 'InvalidAccessKeyId|SignatureDoesNotMatch|InvalidToken' <<<"$body"; then echo invalid; else echo valid; fi

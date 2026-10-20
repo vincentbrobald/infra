@@ -1,0 +1,37 @@
+---
+# Keycloak release (tarball from GitHub, verified against its published SHA-1).
+keycloak_version: 26.8.1
+keycloak_url: "https://github.com/keycloak/keycloak/releases/download/{{ keycloak_version }}/keycloak-{{ keycloak_version }}.tar.gz"
+keycloak_home: /opt/keycloak                 # symlink to /opt/keycloak-<version>
+keycloak_user: keycloak
+
+# Public name: Keycloak's hostname setting and Caddy's site address.
+keycloak_hostname: "{{ inventory_hostname }}"
+keycloak_http_port: 8080                     # bound to 127.0.0.1 only
+keycloak_management_port: 9000               # health endpoints, 127.0.0.1 only
+keycloak_java_package: java-21-openjdk-headless
+
+# Database (local PostgreSQL). The password is generated on the host on first
+# run and kept in keycloak_db_password_file.
+keycloak_db_name: keycloak
+keycloak_db_user: keycloak
+keycloak_db_password_file: /etc/keycloak/db-password
+
+# Permanent admin user in the master realm. Its password is read from this file
+# on the Ansible controller; it's created there (random, 32 chars) if missing.
+# Keep it out of git: the default is in the site's secrets tree.
+# The admin is only created on first deployment (marker file below); later runs
+# don't touch it, so a password changed in Keycloak stays.
+keycloak_admin_user: admin
+keycloak_admin_password_file: "{{ site_secrets_dir }}/{{ inventory_hostname_short }}/keycloak-admin-password"
+keycloak_admin_marker: /etc/keycloak/admin-created
+
+# TLS: Caddy gets the certificate over ACME. For a private ACME CA, give its
+# root certificate (controller path); it's added to the host's trust store.
+keycloak_acme_ca: ""                         # empty: Caddy's default (Let's Encrypt)
+keycloak_acme_email: ""
+keycloak_ca_cert_src: ""                     # empty: no private CA
+keycloak_ca_cert_name: private-root-ca.crt   # file name in the trust anchors
+
+# Caddy from its official COPR repository.
+keycloak_caddy_copr: "@caddy/caddy"

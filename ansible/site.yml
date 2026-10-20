@@ -1,0 +1,22 @@
+---
+# Every infrastructure VM, from nothing or to bring them back in line, in
+# dependency order; each playbook creates its VM first when it is missing.
+# Safe to re-run; --check --diff shows what would change.
+#   ansible-playbook site.yml [--limit <host>] [--check --diff]
+#   ansible-playbook site.yml --tags vm       # only create the missing VMs
+- name: Gitops checkout
+  ansible.builtin.import_playbook: gitops.yml
+- name: Certificate authority
+  ansible.builtin.import_playbook: pki.yml
+- name: Keycloak
+  ansible.builtin.import_playbook: keycloak.yml
+- name: Forgejo
+  ansible.builtin.import_playbook: forgejo.yml
+- name: Object storage
+  ansible.builtin.import_playbook: backup.yml
+- name: Registry
+  ansible.builtin.import_playbook: registry.yml
+- name: Artifacts (Artifact Keeper)
+  ansible.builtin.import_playbook: artifacts.yml
+- name: Omni (only with a host in the inventory group omni)
+  ansible.builtin.import_playbook: omni.yml

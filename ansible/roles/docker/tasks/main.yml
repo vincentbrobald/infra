@@ -1,0 +1,61 @@
+---
+# Docker Engine from Docker's repository for RHEL 10 (Apache-2.0), and its
+# compose plugin: the services shipped as docker compose (Harbor, Artifact
+# Keeper) run on them.
+- name: Docker CE repository
+  ansible.builtin.yum_repository:
+    name: docker-ce-stable
+    description: Docker CE Stable
+    baseurl: https://download.docker.com/linux/rhel/$releasever/$basearch/stable
+    gpgcheck: true
+    gpgkey: https://download.docker.com/linux/rhel/gpg
+
+- name: Docker Engine {{ docker_ce_version }}, compose {{ docker_compose_version }}
+  ansible.builtin.dnf:
+    name:
+      - "docker-ce-3:{{ docker_ce_version }}-1.el10"
+      - "docker-ce-cli-1:{{ docker_ce_version }}-1.el10"
+      - containerd.io
+      - "docker-compose-plugin-{{ docker_compose_version }}-1.el10"
+    state: present
+    allow_downgrade: false
+  notify: Restart docker
+
+# IPv4 forwarding: Docker's containers reach out through it (with the
+# nftables backend Docker requires it set; its own rules filter what is
+# forwarded). The VM has one interface: it routes nothing else.
+- name: IPv4 forwarding for Docker's containers
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/90-docker.conf
+    content: "net.ipv4.ip_forward = 1\n"
+    owner: root
+    group: root
+    mode: "0644"
+  register: docker_sysctl
+
+- name: Apply it now
+  ansible.builtin.command:
+    cmd: sysctl -q -p /etc/sysctl.d/90-docker.conf
+  when: docker_sysctl.changed
+  changed_when: true
+
+# Published ports bind to loopback unless a container says otherwise: the
+# services are reached through Caddy only. Firewall rules as nftables (Docker 29): the
+# iptables ones fail on EL10 (its kernel lacks the legacy xtables matches).
+- name: Docker daemon settings
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: "{{ {'ip': '127.0.0.1', 'log-driver': 'local', 'firewall-backend': 'nftables'} | to_nice_json }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart docker
+
+- name: Start Docker
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Apply a pending Docker restart
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,54 @@
+---
+- name: Admin login
+  ansible.builtin.include_tasks: token.yml
+
+- name: Look up realm {{ keycloak_realm_name }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_name }}"
+    headers: "{{ keycloak_realm_auth }}"
+    status_code: [200, 404]
+  register: keycloak_realm_found
+  check_mode: false
+
+- name: Create realm {{ keycloak_realm_name }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms"
+    method: POST
+    headers: "{{ keycloak_realm_auth }}"
+    body_format: json
+    body: {realm: "{{ keycloak_realm_name }}", enabled: true}
+    status_code: 201
+  when: keycloak_realm_found.status == 404
+  changed_when: true
+
+- name: Look up the groups
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_name }}/groups?search={{ item | urlencode }}&exact=true"
+    headers: "{{ keycloak_realm_auth }}"
+  loop: "{{ keycloak_realm_groups }}"
+  register: keycloak_realm_group_found
+  when: keycloak_realm_found.status == 200
+  check_mode: false
+
+# "search" also matches subgroups (and substrings in older versions):
+# compare the names exactly.
+- name: Create the missing groups
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_name }}/groups"
+    method: POST
+    headers: "{{ keycloak_realm_auth }}"
+    body_format: json
+    body: {name: "{{ item.item }}"}
+    status_code: 201
+  loop: "{{ keycloak_realm_group_found.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.skipped | default(false) or item.json | selectattr('name', 'equalto', item.item) | list | length == 0
+  changed_when: true
+
+- name: Clients
+  ansible.builtin.include_tasks: client.yml
+  loop: "{{ keycloak_realm_clients }}"
+  loop_control:
+    loop_var: client
+    label: "{{ client.client_id }}"

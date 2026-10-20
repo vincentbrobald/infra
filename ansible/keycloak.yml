@@ -1,0 +1,25 @@
+---
+# Keycloak on oauth (role keycloak), then the site's realm,
+# groups and the clients (Forgejo, Omni, Crossplane; Harbor's and the
+# clusters' own come from Crossplane and deploy-talos.py).
+# The VM is created first when it does not exist (role libvirt_vm).
+#   ansible-playbook keycloak.yml [--check --diff]
+- name: Gitops checkout
+  ansible.builtin.import_playbook: gitops.yml
+
+- name: VM
+  hosts: keycloak
+  gather_facts: false
+  tags: [vm]
+  roles:
+    - libvirt_vm
+
+- name: Keycloak
+  hosts: keycloak
+  become: true
+  gather_facts: false          # site_guard gathers them
+  roles:
+    - site_guard
+    - keycloak
+    - {role: site_ca, site_ca_install: false}   # retire the CA's earlier file names
+    - keycloak_realm

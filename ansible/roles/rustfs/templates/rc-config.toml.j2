@@ -1,0 +1,17 @@
+schema_version = 1
+
+[defaults]
+output = "human"
+color = "auto"
+progress = true
+
+[[aliases]]
+name = "local"
+endpoint = "http://127.0.0.1:9000"
+access_key = "{{ rustfs_root_access_key }}"
+secret_key = "{{ rustfs_root_secret_key }}"
+anonymous = false
+region = "us-east-1"
+signature = "v4"
+bucket_lookup = "auto"
+insecure = false

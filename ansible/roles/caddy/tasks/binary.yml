@@ -1,0 +1,107 @@
+---
+# Caddy {{ caddy_version }} from its release (SHA-512 from the release's
+# checksums file) as /usr/local/bin/caddy, with the SELinux type of the
+# packaged binary (httpd_exec_t on Fedora, so it stays confined), and a
+# drop-in pointing the package's unit at it. Also used by the keycloak role.
+- name: Installed Caddy release
+  ansible.builtin.command: /usr/local/bin/caddy version
+  register: caddy_installed
+  changed_when: false
+  failed_when: false
+  check_mode: false              # read-only; needed for --check
+
+- name: Would install Caddy {{ caddy_version }}
+  ansible.builtin.debug:
+    msg: "Caddy {{ caddy_version }} would replace {{ caddy_installed.stdout.split()[0] | default('the packaged binary') }}"
+  when: ansible_check_mode and caddy_installed.stdout is not search('^v' ~ caddy_version ~ ' ')
+
+- name: Install Caddy {{ caddy_version }}
+  when: not ansible_check_mode and caddy_installed.stdout is not search('^v' ~ caddy_version ~ ' ')
+  vars:
+    base: "https://github.com/caddyserver/caddy/releases/download/v{{ caddy_version }}"
+    tarball: "caddy_{{ caddy_version }}_linux_amd64.tar.gz"
+  block:
+    - name: Download the release (checked against its checksums file)
+      ansible.builtin.get_url:
+        url: "{{ base }}/{{ tarball }}"
+        dest: "/tmp/{{ tarball }}"
+        checksum: "sha512:{{ base }}/caddy_{{ caddy_version }}_checksums.txt"
+        mode: "0600"
+
+    - name: Unpack the binary
+      ansible.builtin.unarchive:
+        src: "/tmp/{{ tarball }}"
+        dest: /tmp
+        remote_src: true
+        include: [caddy]
+
+    - name: /usr/local/bin/caddy
+      ansible.builtin.copy:
+        src: /tmp/caddy
+        dest: /usr/local/bin/caddy
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart caddy
+
+    - name: Remove the download
+      ansible.builtin.file:
+        path: "/tmp/{{ item }}"
+        state: absent
+      loop: ["{{ tarball }}", caddy]
+
+- name: SELinux type of the packaged binary
+  ansible.builtin.command: stat -c %C /usr/bin/caddy
+  register: caddy_pkg_context
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Current SELinux type of /usr/local/bin/caddy
+  ansible.builtin.command: stat -c %C /usr/local/bin/caddy
+  register: caddy_bin_context
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Label /usr/local/bin/caddy like the packaged binary
+  ansible.builtin.shell: |
+    set -e
+    t={{ caddy_pkg_context.stdout.split(':')[2] }}
+    semanage fcontext -a -t "$t" /usr/local/bin/caddy 2>/dev/null || semanage fcontext -m -t "$t" /usr/local/bin/caddy
+    restorecon -F /usr/local/bin/caddy
+  when:
+    - caddy_pkg_context.rc == 0 and caddy_bin_context.rc == 0
+    - caddy_pkg_context.stdout.split(':')[2] != caddy_bin_context.stdout.split(':')[2]
+  changed_when: true
+  notify: Restart caddy
+
+- name: The package's unit
+  ansible.builtin.slurp:
+    src: /usr/lib/systemd/system/caddy.service
+  register: caddy_unit
+
+- name: Directory of the drop-in
+  ansible.builtin.file:
+    path: /etc/systemd/system/caddy.service.d
+    state: directory
+    mode: "0755"
+
+# Each Exec* line of the package's unit, reset then repeated with the
+# release binary.
+- name: Run the release binary (drop-in)
+  ansible.builtin.copy:
+    content: |
+      # Managed by Ansible (role caddy): Caddy {{ caddy_version }} from its release.
+      [Service]
+      {% for line in caddy_unit.content | b64decode | split('\n') if line is match('^Exec[A-Za-z]*=') %}
+      {% set key = line.split('=', 1)[0] %}
+      {{ key }}=
+      {{ key }}={{ line.split('=', 1)[1] | replace('/usr/bin/caddy', '/usr/local/bin/caddy') }}
+      {% endfor %}
+    dest: /etc/systemd/system/caddy.service.d/release-binary.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart caddy

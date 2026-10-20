@@ -1,0 +1,17 @@
+# {{ ansible_managed }} (role artifact_keeper)
+[Unit]
+Description=Artifact Keeper package registry (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ artifact_keeper_dir }}
+ExecStart=/usr/bin/docker compose -f {{ artifact_keeper_dir }}/docker-compose.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f {{ artifact_keeper_dir }}/docker-compose.yml down
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

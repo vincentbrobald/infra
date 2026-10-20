@@ -1,0 +1,56 @@
+---
+# Forgejo (Git server) behind Caddy, SQLite database, SSH on its own port.
+forgejo_version: 16.0.5
+forgejo_hostname: "{{ inventory_hostname }}"
+forgejo_app_name: Forgejo
+forgejo_ssh_port: 2222
+forgejo_http_port: 8080                       # 127.0.0.1 only, behind Caddy
+forgejo_work_dir: /var/lib/forgejo
+forgejo_webhook_allowed_hosts: []             # hosts webhooks may call ([webhook] ALLOWED_HOST_LIST)
+
+# Admin user (CLI-created); password file on the controller (absolute, or
+# under site_secrets_dir), generated when missing.
+forgejo_admin: {name: gitadmin, email: "gitadmin@{{ site_domain }}", password_file: forgejo/admin-password}
+
+# Login with Keycloak (an OAuth2 source), created when missing; an existing
+# source is left as it is. The client is made by the keycloak_realm role.
+forgejo_oidc: {}
+#  name: keycloak
+#  client_id: forgejo
+#  secret_file: forgejo/oidc-client-secret
+#  issuer: "{{ site_oidc_issuer }}"
+
+# Local users: password_file (generated when missing), admin (site admin,
+# default false) and access tokens.
+# A token's value comes from the gitops repository when its Secret is there
+# (gitops: {topic, key}), else from its file; one in neither is created and
+# written to the file. A known token Forgejo does not accept (a rebuilt
+# server) is put back into Forgejo's database with that same value.
+forgejo_users: []
+#  - name: pac-bot
+#    email: pac-bot@example.com
+#    full_name: CI bot
+#    password_file: forgejo/pac-bot-password
+#    tokens:
+#      - {name: ci, scopes: [write:repository], file: forgejo/pac-bot-token,
+#         gitops: {topic: ns/secret, key: provider.token}}
+
+# Repositories: created empty when missing (the owner must exist; users who
+# log in with Keycloak exist after their first login), with collaborators,
+# deploy keys (public key files) and webhooks (secret from gitops or a file).
+forgejo_repos: []
+#  - owner: gitadmin
+#    name: gitops
+#    private: true
+#    collaborators: [{user: reader, permission: read}]
+#    deploy_keys: [{title: argocd, key_file: /path/key.pub, read_only: true}]
+#    webhooks:
+#      - {url: "https://ci.example.com", events: [push], secret_file: forgejo/hook-secret,
+#         gitops: {topic: ns/secret, key: webhook.secret}}
+#      # replaces: [http://ci.example.com]   # old URLs of a moved hook: deleted
+#    branch_protections:          # keys as the API takes them (tasks/branch_protection.yml)
+#      - {rule_name: main, enable_status_check: true, status_check_contexts: ["ci / check"],
+#         block_on_outdated_branch: true}
+
+# API, from the host itself.
+forgejo_api: "http://127.0.0.1:{{ forgejo_http_port }}/api/v1"

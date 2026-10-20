@@ -1,0 +1,31 @@
+---
+# RustFS (S3-compatible object storage) behind Caddy: S3 API on :443 and the
+# web console on :9443, certificates from the site's ACME CA.
+rustfs_version: 1.0.1
+rustfs_rc_version: 0.1.36                    # rc, the administration client
+rustfs_hostname: "{{ inventory_hostname }}"
+rustfs_data_dir: /data/rustfs
+rustfs_conf: /etc/rustfs
+
+# Root credentials: files under site_secrets_dir (generated when missing).
+rustfs_root_access_key_file: backup/rustfs-root-access-key
+rustfs_root_secret_key_file: backup/rustfs-root-secret-key
+
+# Buckets. lock: object lock (only settable at creation) with a default
+# retention; lifecycle: expiry of current versions after expiry_days, of
+# replaced or deleted versions after noncurrent_expiry_days.
+rustfs_buckets: []
+#  - name: talos-backups
+#    lock: {mode: governance, days: 7}
+#    lifecycle: {expiry_days: 30, noncurrent_expiry_days: 1}
+
+# Users, one policy each. access_key_file/secret_key_file under
+# site_secrets_dir; gitops: the Secret holding the same credentials in the
+# gitops repository, whose values win (site_secret).
+rustfs_users: []
+#  - access_key: talos-backup
+#    access_key_file: backup/talos-backup-access-key
+#    secret_key_file: backup/talos-backup-secret-key
+#    gitops: {topic: talos-backup/talos-backup-s3, access_key: AWS_ACCESS_KEY_ID, secret_key: AWS_SECRET_ACCESS_KEY}
+#    policy_name: talos-backup-write
+#    policy: {Version: "2012-10-17", Statement: [...]}

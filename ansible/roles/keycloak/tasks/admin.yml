@@ -1,0 +1,86 @@
+---
+# First deployment only: replace the temporary bootstrap admin with the
+# permanent one (password from keycloak_admin_password_file on the controller).
+- name: Create the permanent admin user
+  when: not keycloak_admin_done.stat.exists
+  vars:
+    kc: "http://127.0.0.1:{{ keycloak_http_port }}"
+    admin_password: "{{ lookup('ansible.builtin.password', keycloak_admin_password_file, length=32, chars=['ascii_letters', 'digits']) }}"
+  block:
+    - name: Log in as the bootstrap admin
+      ansible.builtin.uri:
+        url: "{{ kc }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          client_id: admin-cli
+          username: temp-admin
+          password: "{{ keycloak_bootstrap_password }}"
+      register: keycloak_token
+      no_log: true
+
+    - name: Create the admin user
+      ansible.builtin.uri:
+        url: "{{ kc }}/admin/realms/master/users"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+        body_format: json
+        body:
+          username: "{{ keycloak_admin_user }}"
+          enabled: true
+          credentials:
+            - type: password
+              value: "{{ admin_password }}"
+              temporary: false
+        status_code: [201, 409]          # 409: exists already (interrupted earlier run)
+      no_log: true
+
+    - name: Look up the admin user, the bootstrap admin and the admin role
+      ansible.builtin.uri:
+        url: "{{ kc }}/admin/realms/master/{{ item }}"
+        headers:
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+      loop:
+        - "users?username={{ keycloak_admin_user }}&exact=true"
+        - "users?username=temp-admin&exact=true"
+        - "roles/admin"
+      register: keycloak_lookup
+      no_log: true
+
+    - name: Give the admin user the admin role
+      ansible.builtin.uri:
+        url: "{{ kc }}/admin/realms/master/users/{{ keycloak_lookup.results[0].json[0].id }}/role-mappings/realm"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+        body_format: json
+        body:
+          - "{{ keycloak_lookup.results[2].json }}"
+        status_code: 204
+      no_log: true
+
+    - name: Delete the bootstrap admin
+      ansible.builtin.uri:
+        url: "{{ kc }}/admin/realms/master/users/{{ keycloak_lookup.results[1].json[0].id }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+        status_code: 204
+      no_log: true
+
+    - name: Remove the bootstrap environment file
+      ansible.builtin.file:
+        path: /etc/keycloak/bootstrap.env
+        state: absent
+
+    - name: Mark the admin as created
+      ansible.builtin.file:
+        path: "{{ keycloak_admin_marker }}"
+        state: touch
+        owner: root
+        group: root
+        mode: "0600"
+        modification_time: preserve
+        access_time: preserve

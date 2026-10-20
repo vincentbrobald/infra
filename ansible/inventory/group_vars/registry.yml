@@ -1,0 +1,12 @@
+---
+# Harbor on registry (role harbor; see roles/harbor/defaults/main.yml).
+# What Harbor holds (projects, proxy caches,
+# robot accounts, the Keycloak login) comes from Crossplane (gitops
+# clusters/lab/registries/harbor). tasks/zot-removed.yml keeps the former
+# registry (zot) removed.
+harbor_hostname: "{{ inventory_hostname }}"
+# DNS: the VM's name as a host entry on the router (owner
+# infra-ansible:harbor). A host entry for a DHCP VM's address replaces the
+# name of its lease (OPNsense's Dnsmasq), so every name of the VM must be
+# a host entry (docs/explanation/dns-registration.md).
+harbor_dns_records: ["{{ inventory_hostname }}"]

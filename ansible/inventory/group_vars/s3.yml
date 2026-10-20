@@ -1,0 +1,24 @@
+---
+# RustFS on backup (role rustfs; see roles/rustfs/defaults/main.yml).
+rustfs_buckets:
+  # etcd backups of the Talos clusters: every object version is kept at
+  # least 7 days (write-once), current versions expire after 30 days.
+  - name: talos-backups
+    lock: {mode: governance, days: 7}
+    lifecycle: {expiry_days: 30, noncurrent_expiry_days: 1}
+  # The role doesn't remove buckets or users: delete them with rc
+  # (docs/how-to/rebuild-or-remove-a-vm.md).
+
+rustfs_users:
+  # May only add objects: it can neither read, list, overwrite a locked
+  # version nor delete, so a leaked key cannot destroy backups. The clusters
+  # hold it as Secret talos-backup/talos-backup-s3 (gitops, SOPS).
+  - access_key: talos-backup
+    access_key_file: backup/talos-backup-access-key
+    secret_key_file: backup/talos-backup-secret-key
+    gitops: {topic: talos-backup/talos-backup-s3, access_key: AWS_ACCESS_KEY_ID, secret_key: AWS_SECRET_ACCESS_KEY}
+    policy_name: talos-backup-write
+    policy:
+      Version: "2012-10-17"
+      Statement:
+        - {Effect: Allow, Action: ["s3:PutObject"], Resource: ["arn:aws:s3:::talos-backups/*"]}

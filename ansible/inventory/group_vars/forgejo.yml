@@ -1,0 +1,127 @@
+---
+# Forgejo on forgejo (role forgejo; see roles/forgejo/defaults/main.yml): the
+# Git server of the gitops repository Argo CD deploys the clusters from.
+forgejo_app_name: Forgejo (test)
+# Pipelines-as-Code on cluster lab receives the pac-demo webhooks.
+forgejo_webhook_allowed_hosts: [pac.apps.lab.example.org]
+
+forgejo_admin: {name: gitadmin, email: gitadmin@forgejo.test, password_file: "{{ site_lab_dir }}/forgejo-test/admin_password"}
+
+forgejo_oidc:
+  name: keycloak
+  client_id: forgejo
+  secret_file: forgejo/oidc-client-secret
+  issuer: "{{ site_oidc_issuer }}"
+
+forgejo_users:
+  # Argo CD reads the gitops repository with it (https) or a deploy key (ssh).
+  - name: argocd-reader
+    email: argocd-reader@forgejo.test
+    password_file: "{{ site_lab_dir }}/forgejo-test/reader_password"
+    tokens:
+      - {name: argocd, scopes: ["read:repository"], file: "{{ site_lab_dir }}/forgejo-test/reader_token"}
+  # Pipelines-as-Code's account: reads the repositories, reports results.
+  # Its token is in the gitops repository (Secret pac-demo/forgejo-pac).
+  - name: pac-bot
+    email: pac-bot@example.org
+    full_name: Pipelines-as-Code bot
+    password_file: forgejo/pac-bot-password
+    tokens:
+      - name: pipelines-as-code
+        scopes: ["write:issue", "write:repository", "read:user"]
+        file: forgejo/pac-bot-token
+        gitops: {topic: pac-demo/forgejo-pac, key: provider.token}
+
+  # Crossplane on cluster lab (provider-forgejo, gitops clusters/lab/crossplane):
+  # manages repository settings, the organization example, its teams and
+  # repositories, and the teams' CI bots (ci-<team>) with this token. Admin
+  # collaborator of the repositories it manages (below), owner of the
+  # organization it creates; a site admin, only to create the
+  # bot users (write:admin; the user's admin rights reach no further than its
+  # token's scopes). Its token is in the gitops repository (Secret
+  # crossplane-system/forgejo-credentials).
+  - name: crossplane-lab
+    email: crossplane-lab@example.org
+    full_name: Crossplane (lab)
+    password_file: forgejo/crossplane-lab-password
+    admin: true
+    tokens:
+      - name: crossplane
+        # write:organization: it creates the organizations (gitops
+        # applications/<org>/organization.yaml), their teams and repositories.
+        # write:admin, read:user: the teams' CI users (gitops base/team, ci.yaml).
+        scopes: ["write:repository", "write:organization", "write:admin", "read:user"]
+        file: forgejo/crossplane-lab-token
+        gitops: {topic: crossplane-system/forgejo-credentials, key: api_token}
+
+forgejo_repos:
+  - owner: alice
+    name: gitops
+    private: true
+    # pac-bot: Pipelines-as-Code runs the merge-request checks (.tekton/ of
+    # the repository; namespace gitops-ci on lab) and reports their status.
+    collaborators: [{user: argocd-reader, permission: read}, {user: pac-bot, permission: write}]
+    deploy_keys:
+      - {title: argocd, key_file: "{{ site_lab_dir }}/forgejo-test/deploy_key.pub", read_only: true}
+      - {title: deploy-talos.py push, key_file: "{{ site_secrets_dir }}/forgejo/gitops-push_key.pub", read_only: false}
+    webhooks:
+      - url: https://pac.apps.lab.example.org
+        replaces: [http://pac.apps.lab.example.org]
+        events: [push, issue_comment, pull_request, pull_request_assign, pull_request_label, pull_request_milestone,
+                 pull_request_comment, pull_request_review_approved, pull_request_review_rejected,
+                 pull_request_review_comment, pull_request_sync, pull_request_review_request]
+        secret_file: forgejo/gitops-webhook-secret
+        gitops: {topic: gitops-ci/forgejo-pac, key: webhook.secret}
+    # main: merged through pull requests that pass the checks, up to date with
+    # main (the checks render what the merge gives). Direct pushes: deploy keys
+    # only (deploy-talos.py commits the generated files).
+    branch_protections:
+      - rule_name: main
+        enable_status_check: true
+        status_check_contexts: ["Pipelines as Code CI / gitops-check"]
+        block_on_outdated_branch: true
+        enable_push: true
+        enable_push_whitelist: true
+        push_whitelist_usernames: []
+        push_whitelist_deploy_keys: true
+  # The image of the gitops merge-request checks (gitops-check), built and
+  # pushed by its own pipeline (namespace gitops-scanner on lab).
+  - owner: alice
+    name: gitops-scanner
+    private: true
+    # Its collaborator pac-bot, PaC webhook and deploy key push are managed by
+    # Crossplane (gitops clusters/lab/ci/gitops-scanner/repository.yaml); undo:
+    # docs/how-to/hand-back-to-ansible.md. crossplane-lab's own access stays here.
+    collaborators: [{user: crossplane-lab, permission: admin}]
+  # Demo repository of the CI; its owner logs in with Keycloak.
+  - owner: alice
+    name: pac-demo
+    private: true
+    # Its collaborator pac-bot and PaC webhook are managed by
+    # Crossplane (gitops clusters/lab/ci/pac-demo/repository.yaml); undo:
+    # docs/how-to/hand-back-to-ansible.md. crossplane-lab's own access stays here.
+    collaborators: [{user: crossplane-lab, permission: admin}]
+  # The Crossplane provider for Artifact Keeper (written by hand), built and
+  # pushed by its own pipeline (namespace provider-artifact-keeper on lab).
+  # Its pac-bot collaborator and webhook come from Crossplane (gitops
+  # clusters/lab/ci/provider-artifact-keeper/repository.yaml),
+  # whose user crossplane-lab reaches it as a site admin (no collaborator).
+  - owner: alice
+    name: provider-artifact-keeper
+    private: true
+  # The Crossplane provider for Forgejo (Upjet), built and pushed by its own
+  # pipeline (namespace provider-forgejo on lab).
+  - owner: alice
+    name: provider-forgejo
+    private: true
+    collaborators: [{user: pac-bot, permission: write}]
+    deploy_keys:
+      - {title: push, key_file: "{{ site_secrets_dir }}/forgejo/gitops-push_key.pub", read_only: false}
+    webhooks:
+      - url: https://pac.apps.lab.example.org
+        replaces: [http://pac.apps.lab.example.org]
+        events: [push, issue_comment, pull_request, pull_request_assign, pull_request_label, pull_request_milestone,
+                 pull_request_comment, pull_request_review_approved, pull_request_review_rejected,
+                 pull_request_review_comment, pull_request_sync, pull_request_review_request]
+        secret_file: forgejo/provider-forgejo-webhook-secret
+        gitops: {topic: provider-forgejo/forgejo-pac, key: webhook.secret}

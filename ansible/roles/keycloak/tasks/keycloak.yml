@@ -1,0 +1,107 @@
+---
+- name: Keycloak system user
+  ansible.builtin.user:
+    name: "{{ keycloak_user }}"
+    system: true
+    home: "{{ keycloak_home }}"
+    create_home: false
+    shell: /sbin/nologin
+
+- name: Check for the Keycloak release
+  ansible.builtin.stat:
+    path: "/opt/keycloak-{{ keycloak_version }}/bin/kc.sh"
+  register: keycloak_release
+
+- name: Download and unpack the Keycloak release
+  when: not keycloak_release.stat.exists
+  block:
+    - name: Download the release tarball (SHA-1 checked)
+      ansible.builtin.get_url:
+        url: "{{ keycloak_url }}"
+        dest: "/tmp/keycloak-{{ keycloak_version }}.tar.gz"
+        checksum: "sha1:{{ keycloak_url }}.sha1"
+        mode: "0600"
+
+    - name: Unpack the release
+      ansible.builtin.unarchive:
+        src: "/tmp/keycloak-{{ keycloak_version }}.tar.gz"
+        dest: /opt
+        remote_src: true
+        owner: "{{ keycloak_user }}"
+        group: "{{ keycloak_user }}"
+
+    - name: Remove the tarball
+      ansible.builtin.file:
+        path: "/tmp/keycloak-{{ keycloak_version }}.tar.gz"
+        state: absent
+
+- name: Point {{ keycloak_home }} at this release
+  ansible.builtin.file:
+    src: "/opt/keycloak-{{ keycloak_version }}"
+    dest: "{{ keycloak_home }}"
+    state: link
+  notify: Build keycloak
+
+- name: Keycloak configuration
+  ansible.builtin.template:
+    src: keycloak.conf.j2
+    dest: "/opt/keycloak-{{ keycloak_version }}/conf/keycloak.conf"
+    owner: root
+    group: "{{ keycloak_user }}"
+    mode: "0640"
+  notify: Build keycloak
+
+- name: Keycloak systemd service
+  ansible.builtin.template:
+    src: keycloak.service.j2
+    dest: /etc/systemd/system/keycloak.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart keycloak
+
+- name: Check whether the admin user exists already
+  ansible.builtin.stat:
+    path: "{{ keycloak_admin_marker }}"
+  register: keycloak_admin_done
+
+- name: Temporary bootstrap admin (first deployment only)
+  when: not keycloak_admin_done.stat.exists
+  block:
+    - name: Generate the bootstrap admin password
+      ansible.builtin.set_fact:
+        keycloak_bootstrap_password: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) }}"
+      no_log: true
+
+    - name: Bootstrap admin environment file
+      ansible.builtin.copy:
+        dest: /etc/keycloak/bootstrap.env
+        content: |
+          KC_BOOTSTRAP_ADMIN_USERNAME=temp-admin
+          KC_BOOTSTRAP_ADMIN_PASSWORD={{ keycloak_bootstrap_password }}
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+      notify: Restart keycloak
+
+- name: Apply pending rebuilds and restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Keycloak
+  ansible.builtin.systemd_service:
+    name: keycloak
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Wait until Keycloak is ready
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ keycloak_management_port }}/health/ready"
+    status_code: 200
+  register: keycloak_ready
+  until: keycloak_ready.status == 200
+  retries: 90
+  delay: 2
+  changed_when: false
+  check_mode: false          # read-only; needed for --check

@@ -1,0 +1,38 @@
+---
+# Omni (Sidero Labs), the web console and API for Talos clusters, as a
+# Podman container (systemd quadlet) behind Caddy, which terminates TLS with
+# a certificate from the site's ACME CA. Login with Keycloak (OIDC).
+# Business Source License: free for non-production use, a home lab included.
+omni_version: v1.12.2
+# Pulled through the site's registry mirror.
+omni_image: "{{ site_registry_host }}/ghcr.io/siderolabs/omni:{{ omni_version }}"
+omni_hostname: "{{ inventory_hostname }}"
+omni_account_name: "{{ site_domain }}"
+# Created as admins on the first start (Keycloak users, by e-mail); others
+# are added in Omni (Settings > Users). Keycloak alone doesn't let anyone in.
+omni_initial_users: []
+omni_eula_name: ""
+omni_eula_email: ""
+# Keycloak client (role keycloak_realm, keycloak.yml): its secret is read here.
+omni_oidc_issuer: "{{ site_oidc_issuer }}"
+omni_oidc_client_id: omni
+omni_oidc_client_secret_file: oauth/omni-client-secret
+# Files under site_secrets_dir:
+# - the account id (a UUID, generated once; never change it),
+# - the GPG key that encrypts Omni's etcd (generated once on the VM, kept here
+#   so a rebuilt VM reads its data again),
+# - the key of the initial service account (Admin, for automation such as
+#   deploy-talos.py's import; valid omni_service_account_lifetime from the
+#   first start).
+omni_account_id_file: omni/account-id
+omni_gpg_key_file: omni/omni.asc
+omni_service_account_key_file: omni/automation-key
+omni_service_account_lifetime: 8760h
+# Ports: Caddy (TLS) in front, Omni on loopback behind it.
+omni_api_port: 8080                # UI and API (behind :443)
+omni_machine_api_port: 18090       # SideroLink API (behind :8090), what Talos nodes join
+omni_k8s_proxy_port: 18100         # Kubernetes API proxy (behind :8100)
+omni_wireguard_port: 50180         # SideroLink WireGuard (UDP), straight to Omni
+omni_event_sink_port: 8091         # nodes' events, over WireGuard
+omni_data_dir: /var/lib/omni       # embedded etcd, SQLite, the service account key
+omni_config_dir: /etc/omni

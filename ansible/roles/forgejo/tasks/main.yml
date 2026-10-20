@@ -1,0 +1,156 @@
+---
+- name: Install Git
+  ansible.builtin.dnf:
+    name: [git-core, python3]     # git-core: what Forgejo needs, without the Perl tools of "git"
+    state: present
+
+- name: Forgejo {{ forgejo_version }} (checked against its .sha256)
+  ansible.builtin.get_url:
+    url: "https://codeberg.org/forgejo/forgejo/releases/download/v{{ forgejo_version }}/forgejo-{{ forgejo_version }}-linux-amd64"
+    dest: /usr/local/bin/forgejo
+    checksum: "sha256:https://codeberg.org/forgejo/forgejo/releases/download/v{{ forgejo_version }}/forgejo-{{ forgejo_version }}-linux-amd64.sha256"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart forgejo
+
+- name: git user
+  ansible.builtin.user:
+    name: git
+    system: true
+    home: "{{ forgejo_work_dir }}"
+    create_home: false
+
+- name: Directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: git
+    group: git
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /etc/forgejo, mode: "0750"}
+    - {path: /etc/forgejo/webhooks, mode: "0700"}
+    - {path: "{{ forgejo_work_dir }}", mode: "0700"}
+    - {path: "{{ forgejo_work_dir }}/custom", mode: "0750"}
+    - {path: "{{ forgejo_work_dir }}/data", mode: "0750"}
+    - {path: "{{ forgejo_work_dir }}/log", mode: "0750"}
+
+- name: Helpers
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/local/sbin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop: [forgejo-secret-files, forgejo-import-token]
+
+# Secret key, internal token and JWT secret live in files, so app.ini holds
+# no secret. Values app.ini still has inline are moved, not replaced.
+- name: Forgejo's secrets as files
+  ansible.builtin.command: /usr/local/sbin/forgejo-secret-files
+  register: forgejo_secret_files
+  changed_when: forgejo_secret_files.stdout | length > 0
+  when: not ansible_check_mode   # writes files; skipped in --check
+
+- name: app.ini
+  ansible.builtin.template:
+    src: app.ini.j2
+    dest: /etc/forgejo/app.ini
+    owner: git
+    group: git
+    mode: "0640"
+    backup: true
+  diff: false                    # an older app.ini may still hold the secrets inline
+  notify: Restart forgejo
+
+- name: Forgejo systemd service
+  ansible.builtin.template:
+    src: forgejo.service.j2
+    dest: /etc/systemd/system/forgejo.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart forgejo
+
+- name: Apply a pending restart
+  ansible.builtin.meta: flush_handlers
+
+- name: Start Forgejo
+  ansible.builtin.systemd_service:
+    name: forgejo
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Check for firewalld
+  ansible.builtin.command: systemctl is-active firewalld
+  register: forgejo_firewalld
+  changed_when: false
+  failed_when: false
+  check_mode: false            # read-only; needed for --check
+
+- name: Open HTTP, HTTPS and Git over SSH in firewalld
+  ansible.builtin.command: firewall-cmd --permanent {{ item }}
+  loop: ["--add-service=http", "--add-service=https", "--add-port={{ forgejo_ssh_port }}/tcp"]
+  register: forgejo_fw
+  changed_when: "'ALREADY_ENABLED' not in forgejo_fw.stderr"
+  when: forgejo_firewalld.stdout == 'active'
+
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  when: forgejo_fw is changed
+  changed_when: true
+
+# Caddy runs confined (httpd_t) and relays to Forgejo's local port.
+- name: Check whether Caddy may relay (SELinux)
+  ansible.builtin.command: getsebool httpd_can_network_relay
+  register: forgejo_relay
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Let Caddy relay to Forgejo (SELinux)
+  ansible.builtin.command: setsebool -P httpd_can_network_relay on
+  when: forgejo_relay.rc == 0 and forgejo_relay.stdout is search('off$')
+  changed_when: true
+
+- name: Caddy
+  ansible.builtin.include_role:
+    name: caddy
+  vars:
+    caddy_sites: |
+      {{ forgejo_hostname }} {
+      	reverse_proxy 127.0.0.1:{{ forgejo_http_port }}
+      }
+
+- name: Wait until Forgejo answers on https://{{ forgejo_hostname }}
+  ansible.builtin.uri:
+    url: "https://{{ forgejo_hostname }}/api/v1/version"
+    status_code: [200, 403]        # 403: answered, sign-in required (REQUIRE_SIGNIN_VIEW)
+  register: forgejo_up
+  until: forgejo_up.status in [200, 403]
+  retries: 60
+  delay: 2
+  check_mode: false
+
+- name: Admin user
+  ansible.builtin.include_tasks: admin.yml
+
+- name: Login with Keycloak
+  ansible.builtin.include_tasks: oidc.yml
+  when: forgejo_oidc | length > 0
+
+- name: Users
+  ansible.builtin.include_tasks: user.yml
+  loop: "{{ forgejo_users }}"
+  loop_control:
+    loop_var: user
+    label: "{{ user.name }}"
+
+- name: Repositories
+  ansible.builtin.include_tasks: repo.yml
+  loop: "{{ forgejo_repos }}"
+  loop_control:
+    loop_var: repo
+    label: "{{ repo.owner }}/{{ repo.name }}"

@@ -1,0 +1,121 @@
+---
+- name: Admin login
+  ansible.builtin.include_tasks: token.yml
+
+# The client's realm: the site's, unless the client names another (a service
+# account administering the site's realm lives in master).
+- name: Realm of client {{ client.client_id }}
+  ansible.builtin.set_fact:
+    keycloak_realm_client_realm: "{{ client.realm | default(keycloak_realm_name) }}"
+    keycloak_realm_service_account: "{{ client.service_account_roles is defined }}"
+
+- name: Desired settings of client {{ client.client_id }}
+  ansible.builtin.set_fact:
+    keycloak_realm_rep: >-
+      {{ {'clientId': client.client_id, 'protocol': 'openid-connect', 'enabled': true,
+          'publicClient': false, 'clientAuthenticatorType': 'client-secret',
+          'standardFlowEnabled': not keycloak_realm_service_account,
+          'serviceAccountsEnabled': keycloak_realm_service_account,
+          'directAccessGrantsEnabled': false, 'implicitFlowEnabled': false,
+          'redirectUris': client.redirect_uris | default([]), 'webOrigins': client.web_origins | default([]),
+          'secret': lookup('site_secret', client.secret_file, generate='alnum:32',
+                           topic=client.gitops.topic | default(None), key=client.gitops.key | default(None))}
+         | combine({'name': client.name} if client.name is defined else {})
+         | combine({'rootUrl': client.root_url} if client.root_url is defined else {})
+         | combine({'baseUrl': client.base_url} if client.base_url is defined else {}) }}
+    keycloak_realm_attributes: >-
+      {{ {'post.logout.redirect.uris': client.post_logout_redirect_uris}
+         if client.post_logout_redirect_uris is defined else {} }}
+  no_log: true
+
+- name: Look up client {{ client.client_id }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients?clientId={{ client.client_id | urlencode }}"
+    headers: "{{ keycloak_realm_auth }}"
+  register: keycloak_realm_client
+  no_log: true               # the representation holds the secret
+  check_mode: false
+
+- name: Create client {{ client.client_id }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients"
+    method: POST
+    headers: "{{ keycloak_realm_auth }}"
+    body_format: json
+    body: "{{ keycloak_realm_rep | combine({'attributes': keycloak_realm_attributes}) }}"
+    status_code: 201
+  when: keycloak_realm_client.json | length == 0
+  changed_when: true
+  no_log: true
+
+# PUT replaces the whole client: start from the current representation, so
+# settings made in the console survive, and merge the attributes one by one.
+- name: Update client {{ client.client_id }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients/{{ current.id }}"
+    method: PUT
+    headers: "{{ keycloak_realm_auth }}"
+    body_format: json
+    body: "{{ wanted }}"
+    status_code: 204
+  vars:
+    current: "{{ keycloak_realm_client.json[0] }}"
+    wanted: >-
+      {{ current | combine(keycloak_realm_rep)
+         | combine({'attributes': current.attributes | default({}) | combine(keycloak_realm_attributes)}) }}
+  when: keycloak_realm_client.json | length > 0 and wanted != current
+  changed_when: true
+  no_log: true
+
+- name: Look up client {{ client.client_id }} again (its id when just created)
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients?clientId={{ client.client_id | urlencode }}"
+    headers: "{{ keycloak_realm_auth }}"
+  register: keycloak_realm_client_now
+  no_log: true
+  check_mode: false
+
+- name: Look up the client's mappers
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients/{{ keycloak_realm_client_now.json[0].id }}/protocol-mappers/models"
+    headers: "{{ keycloak_realm_auth }}"
+  register: keycloak_realm_mappers
+  when: client.groups_claim | default(true) and keycloak_realm_client_now.json | length > 0
+  check_mode: false
+
+# Group memberships as a flat "groups" claim (names, not paths).
+- name: Groups claim of client {{ client.client_id }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients/{{ keycloak_realm_client_now.json[0].id }}/protocol-mappers/models"
+    method: POST
+    headers: "{{ keycloak_realm_auth }}"
+    body_format: json
+    body:
+      name: groups
+      protocol: openid-connect
+      protocolMapper: oidc-group-membership-mapper
+      config: {claim.name: groups, full.path: "false", id.token.claim: "true", access.token.claim: "true",
+               userinfo.token.claim: "true", introspection.token.claim: "true"}
+    status_code: 201
+  when:
+    - keycloak_realm_mappers is not skipped
+    - keycloak_realm_mappers.json | selectattr('name', 'equalto', 'groups') | list | length == 0
+  changed_when: true
+
+# Service account: client roles granted to the client's own user (e.g. roles
+# of master's "<realm>-realm" client, which administer that realm). Roles
+# granted in the console are kept.
+- name: Service account of client {{ client.client_id }}
+  ansible.builtin.uri:
+    url: "{{ keycloak_realm_url }}/admin/realms/{{ keycloak_realm_client_realm }}/clients/{{ keycloak_realm_client_now.json[0].id }}/service-account-user"
+    headers: "{{ keycloak_realm_auth }}"
+  register: keycloak_realm_sa_user
+  when: keycloak_realm_service_account and keycloak_realm_client_now.json | length > 0
+  check_mode: false
+
+- name: Roles for the service account of client {{ client.client_id }}
+  ansible.builtin.include_tasks: service_account_role.yml
+  loop: "{{ client.service_account_roles | default([]) | map(attribute='client') | unique }}"
+  loop_control:
+    loop_var: role_client
+  when: keycloak_realm_sa_user is not skipped

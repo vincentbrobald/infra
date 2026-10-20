@@ -1,0 +1,41 @@
+---
+# Everything here runs on the hypervisor (this host); the VM is only
+# reached at the end, over SSH. An existing VM is left as it is.
+- name: Look up VM {{ vm.name }}
+  ansible.builtin.command: virsh -c {{ libvirt_vm_uri }} dominfo {{ vm.name }}
+  delegate_to: localhost
+  register: libvirt_vm_info
+  changed_when: false
+  failed_when: false
+  check_mode: false              # read-only; needed for --check
+
+- name: Check the addressing of {{ vm.name }}
+  ansible.builtin.assert:
+    that:
+      - libvirt_vm_network in ['dhcp', 'static']
+      - libvirt_vm_network == 'dhcp' or libvirt_vm_address is match('^(\d{1,3}\.){3}\d{1,3}$')
+    fail_msg: "vm.network must be dhcp or static; static needs vm.address (a.b.c.d)"
+    quiet: true
+
+- name: DNS record of a static VM
+  ansible.builtin.include_tasks: dns.yml
+  when: libvirt_vm_network == 'static'
+
+- name: Create VM {{ vm.name }}
+  ansible.builtin.include_tasks: create.yml
+  when: libvirt_vm_info.rc != 0
+
+- name: Start {{ vm.name }} with the host
+  ansible.builtin.command: virsh -c {{ libvirt_vm_uri }} autostart {{ vm.name }}
+  delegate_to: localhost
+  when: libvirt_vm_info.rc != 0 or libvirt_vm_info.stdout is not search('Autostart:\s+enable')
+  changed_when: true
+
+- name: Wait for SSH
+  ansible.builtin.wait_for_connection:
+    timeout: 600
+  when: not ansible_check_mode or libvirt_vm_info.rc == 0
+
+- name: Disk size
+  ansible.builtin.include_tasks: grow.yml
+  when: libvirt_vm_info.rc == 0

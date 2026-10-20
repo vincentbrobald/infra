@@ -1,0 +1,244 @@
+---
+# A new VM: preflight, verified cloud image, SSH key, cloud-init seed, disk,
+# domain, then wait for its address, cloud-init and DNS.
+- name: Paths of {{ vm.name }}
+  ansible.builtin.set_fact:
+    libvirt_vm_disk: "{{ libvirt_vm_images_dir }}/{{ vm.name }}.qcow2"
+    libvirt_vm_seed: "{{ libvirt_vm_images_dir }}/{{ vm.name }}-cidata.iso"
+    # Marks files this role is still creating: a run interrupted before the
+    # domain existed may reuse them; files without it belong to someone else.
+    libvirt_vm_marker: "{{ libvirt_vm_images_dir }}/.{{ vm.name }}.creating"
+    # Stable MAC from the host name unless given: a re-created VM gets the
+    # same DHCP lease (and DNS name) from the router.
+    libvirt_vm_mac: >-
+      {{ vm.mac | default('52:54:00:' ~ ((inventory_hostname | hash('sha256'))[:6]
+         | regex_replace('(..)(?=.)', '\1:'))) }}
+
+- name: Preflight
+  delegate_to: localhost
+  block:
+    - name: Check the host's tools
+      ansible.builtin.command: which virsh virt-install qemu-img gpg gpgv ssh-keygen xorriso
+      changed_when: false
+      check_mode: false
+
+    - name: Check the name, MAC and bridge
+      ansible.builtin.stat:
+        path: "/sys/class/net/{{ libvirt_vm_bridge }}/bridge"
+      register: libvirt_vm_br
+
+    - name: Refuse a wrong name, MAC or bridge
+      ansible.builtin.assert:
+        that:
+          - vm.name is match('^[a-z0-9][a-z0-9-]{0,30}$')
+          - inventory_hostname is match('^[a-z0-9-]+(\.[a-z0-9-]+)+$')
+          - libvirt_vm_mac is match('^([0-9a-f]{2}:){5}[0-9a-f]{2}$')
+          - libvirt_vm_br.stat.exists
+        fail_msg: >-
+          vm.name must be [a-z0-9-] (31 chars at most), the host name fully qualified, vm.mac like
+          52:54:00:12:34:56, and {{ libvirt_vm_bridge }} a bridge on this host
+        quiet: true
+
+    - name: Look for files of {{ vm.name }}
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: ["{{ libvirt_vm_disk }}", "{{ libvirt_vm_seed }}", "{{ libvirt_vm_marker }}"]
+      register: libvirt_vm_files
+
+    - name: Refuse files of another VM
+      ansible.builtin.assert:
+        that: libvirt_vm_files.results[2].stat.exists or not (libvirt_vm_files.results[0].stat.exists or libvirt_vm_files.results[1].stat.exists)
+        fail_msg: >-
+          {{ libvirt_vm_disk }} or {{ libvirt_vm_seed }} exists without a VM {{ vm.name }}, and not from an
+          interrupted run of this role: move it away first
+        quiet: true
+
+    # A name answering from a live machine is taken; one pointing at nothing
+    # is usually a leftover DHCP registration of an earlier VM.
+    - name: Resolve {{ inventory_hostname }}
+      ansible.builtin.command: getent hosts {{ inventory_hostname }}
+      register: libvirt_vm_dns
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Check that nothing answers at {{ inventory_hostname }}
+      ansible.builtin.command: ping -c2 -W1 {{ libvirt_vm_dns.stdout.split()[0] }}
+      when: libvirt_vm_dns.rc == 0
+      register: libvirt_vm_ping
+      changed_when: false
+      failed_when: libvirt_vm_ping.rc == 0
+      check_mode: false
+
+    - name: Check that nothing answers at {{ libvirt_vm_address }}
+      ansible.builtin.command: ping -c2 -W1 {{ libvirt_vm_address }}
+      when: libvirt_vm_network == 'static'
+      register: libvirt_vm_ping_static
+      changed_when: false
+      failed_when: libvirt_vm_ping_static.rc == 0
+      check_mode: false
+
+- name: Would create {{ vm.name }}
+  ansible.builtin.debug:
+    msg: "VM {{ vm.name }} ({{ inventory_hostname }}, MAC {{ libvirt_vm_mac }}) does not exist: a real run creates it"
+  when: ansible_check_mode
+
+# The next plays cannot check a VM that does not exist yet (site_guard ends
+# them for this host).
+- name: Remember that {{ vm.name }} is not there
+  ansible.builtin.set_fact:
+    libvirt_vm_missing: true
+  when: ansible_check_mode
+
+- name: Build {{ vm.name }}
+  when: not ansible_check_mode
+  delegate_to: localhost
+  block:
+    - name: Mark the files as being created
+      ansible.builtin.file:
+        path: "{{ libvirt_vm_marker }}"
+        state: touch
+        mode: "0600"
+
+    - name: Image
+      ansible.builtin.include_tasks:
+        file: image.yml
+        apply:
+          delegate_to: localhost
+
+    - name: Key directory
+      ansible.builtin.file:
+        path: "{{ libvirt_vm_key_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: SSH key pair (created once)
+      ansible.builtin.command: >-
+        ssh-keygen -q -t ed25519 -N '' -C '{{ ansible_user }}@{{ inventory_hostname }}'
+        -f {{ libvirt_vm_key_dir }}/id_ed25519
+      args:
+        creates: "{{ libvirt_vm_key_dir }}/id_ed25519"
+
+    - name: Seed directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: -cidata
+      register: libvirt_vm_seed_dir
+
+    - name: cloud-init user-data
+      ansible.builtin.template:
+        src: user-data.j2
+        dest: "{{ libvirt_vm_seed_dir.path }}/user-data"
+        mode: "0600"
+
+    - name: cloud-init meta-data
+      ansible.builtin.copy:
+        content: "instance-id: {{ vm.name }}\nlocal-hostname: {{ inventory_hostname_short }}\n"
+        dest: "{{ libvirt_vm_seed_dir.path }}/meta-data"
+        mode: "0600"
+
+    - name: cloud-init network-config (static address)
+      ansible.builtin.template:
+        src: network-config.j2
+        dest: "{{ libvirt_vm_seed_dir.path }}/network-config"
+        mode: "0600"
+      when: libvirt_vm_network == 'static'
+
+    - name: Seed ISO
+      ansible.builtin.command: >-
+        xorriso -as mkisofs -quiet -V cidata -J -r -o {{ libvirt_vm_seed }} {{ libvirt_vm_seed_dir.path }}
+      changed_when: true
+
+    - name: Seed ISO permissions
+      ansible.builtin.file:
+        path: "{{ libvirt_vm_seed }}"
+        mode: "0600"
+
+    - name: Remove the seed directory
+      ansible.builtin.file:
+        path: "{{ libvirt_vm_seed_dir.path }}"
+        state: absent
+
+    - name: Disk ({{ vm.disk | default('20G') }}) from the image
+      ansible.builtin.copy:
+        src: "{{ libvirt_vm_image }}"
+        dest: "{{ libvirt_vm_disk }}"
+        remote_src: true
+        mode: "0600"
+
+    - name: Resize the disk
+      ansible.builtin.command: qemu-img resize -q {{ libvirt_vm_disk }} {{ vm.disk | default('20G') }}
+      changed_when: true
+
+    - name: Define and start {{ vm.name }}
+      ansible.builtin.command:
+        argv: [virt-install, --connect, "{{ libvirt_vm_uri }}", --name, "{{ vm.name }}",
+               --memory, "{{ vm.memory | default(2048) }}", --vcpus, "{{ vm.vcpus | default(2) }}",
+               --cpu, host-passthrough, --os-variant, almalinux10, --import,
+               --disk, "path={{ libvirt_vm_disk }},format=qcow2,bus=virtio",
+               --disk, "path={{ libvirt_vm_seed }},device=cdrom,readonly=on",
+               --network, "bridge={{ libvirt_vm_bridge }},mac={{ libvirt_vm_mac }},model=virtio",
+               --channel, "unix,target.type=virtio,target.name=org.qemu.guest_agent.0",
+               --graphics, none, --noautoconsole]
+      changed_when: true
+
+    - name: The files belong to the VM now
+      ansible.builtin.file:
+        path: "{{ libvirt_vm_marker }}"
+        state: absent
+
+    # The address comes from the LAN's DHCP server, reported by the guest
+    # agent once cloud-init has installed it. awk reads all its input: exiting
+    # early would make virsh fail with SIGPIPE (pipefail).
+    - name: Wait for {{ vm.name }} to report its address
+      ansible.builtin.shell: >-
+        set -o pipefail;
+        virsh -c {{ libvirt_vm_uri }} domifaddr {{ vm.name }} --source agent 2>/dev/null
+        | awk '$1 != "lo" && $3 == "ipv4" && !found {split($4, a, "/"); print a[1]; found = 1}'
+      register: libvirt_vm_ip
+      until: libvirt_vm_ip.stdout | length > 0
+      retries: 120
+      delay: 5
+      changed_when: false
+
+    - name: Refuse an address other than vm.address
+      ansible.builtin.assert:
+        that: libvirt_vm_ip.stdout == libvirt_vm_address
+        fail_msg: "{{ vm.name }} came up with {{ libvirt_vm_ip.stdout }}, not {{ libvirt_vm_address }}"
+        quiet: true
+      when: libvirt_vm_network == 'static'
+
+    - name: Wait for SSH on {{ libvirt_vm_ip.stdout }}
+      ansible.builtin.wait_for:
+        host: "{{ libvirt_vm_ip.stdout }}"
+        port: 22
+        timeout: 600
+
+    - name: Wait for cloud-init (first boot installs updates)
+      ansible.builtin.command: >-
+        ssh -i {{ libvirt_vm_key_dir }}/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        -o LogLevel=ERROR -o BatchMode=yes {{ ansible_user }}@{{ libvirt_vm_ip.stdout }}
+        'sudo cloud-init status --wait >/dev/null; sudo cloud-init status --long | sed -n "s/^status: //p"'
+      register: libvirt_vm_cloudinit
+      # Retried while SSH is not up yet (255); a cloud-init error stops at once.
+      until: libvirt_vm_cloudinit.rc != 255
+      retries: 30
+      delay: 10
+      failed_when: libvirt_vm_cloudinit.rc != 0 or libvirt_vm_cloudinit.stdout | trim != 'done'
+      changed_when: false
+
+    - name: Wait for {{ inventory_hostname }} to resolve to {{ libvirt_vm_ip.stdout }}
+      ansible.builtin.command: getent hosts {{ inventory_hostname }}
+      register: libvirt_vm_resolved
+      until: libvirt_vm_resolved.stdout.split()[:1] == [libvirt_vm_ip.stdout]
+      retries: 30
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: Warn about DNS
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: {{ inventory_hostname }} does not resolve to {{ libvirt_vm_ip.stdout }} (yet); check the
+          router's DHCP/DNS registration
+      when: libvirt_vm_resolved.stdout.split()[:1] != [libvirt_vm_ip.stdout]

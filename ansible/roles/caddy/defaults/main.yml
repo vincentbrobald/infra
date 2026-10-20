@@ -1,0 +1,12 @@
+---
+# Caddy in front of a service, with certificates from the site's ACME CA.
+# caddy_sites: the site blocks of the Caddyfile (Caddyfile syntax, tabs).
+caddy_sites: ""
+caddy_acme_ca: "{{ site_acme_ca }}"
+caddy_acme_email: "{{ site_acme_email }}"
+caddy_copr: "@caddy/caddy"           # EL only; Fedora ships Caddy
+
+# Caddy's own release binary (checksum-verified) in /usr/local/bin, run by
+# the package's unit through a drop-in: the packages lag upstream. The
+# package stays for the unit, the user and the directories. "": the package's.
+caddy_version: 2.11.7

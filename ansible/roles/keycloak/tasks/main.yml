@@ -1,0 +1,19 @@
+---
+- name: Trust the private CA
+  ansible.builtin.import_tasks: ca.yml
+  when: keycloak_ca_cert_src | length > 0
+
+- name: Packages
+  ansible.builtin.import_tasks: packages.yml
+
+- name: PostgreSQL
+  ansible.builtin.import_tasks: postgresql.yml
+
+- name: Keycloak
+  ansible.builtin.import_tasks: keycloak.yml
+
+- name: Permanent admin user
+  ansible.builtin.import_tasks: admin.yml
+
+- name: Caddy
+  ansible.builtin.import_tasks: caddy.yml

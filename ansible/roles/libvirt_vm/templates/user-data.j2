@@ -1,0 +1,19 @@
+#cloud-config
+hostname: {{ inventory_hostname_short }}
+fqdn: {{ inventory_hostname }}
+prefer_fqdn_over_hostname: false
+manage_etc_hosts: true
+users:
+  - name: {{ ansible_user }}
+    groups: [wheel]
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {{ lookup('ansible.builtin.file', libvirt_vm_key_dir ~ '/id_ed25519.pub') }}
+ssh_pwauth: false
+disable_root: true
+package_upgrade: true
+packages: [qemu-guest-agent]
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]

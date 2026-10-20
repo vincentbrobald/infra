@@ -1,0 +1,83 @@
+---
+# Credentials: from the gitops repository when the Secret is there (its
+# values win), else the files under site_secrets_dir (secret generated).
+- name: Credentials of {{ user.access_key }}
+  ansible.builtin.set_fact:
+    rustfs_ak: >-
+      {{ lookup('site_secret', user.access_key_file, topic=user.gitops.topic | default(None),
+                key=user.gitops.access_key | default(None), default=user.access_key) }}
+    rustfs_sk: >-
+      {{ lookup('site_secret', user.secret_key_file, topic=user.gitops.topic | default(None),
+                key=user.gitops.secret_key | default(None), generate='hex:20') }}
+  no_log: true
+
+- name: Look up user {{ rustfs_ak }}
+  ansible.builtin.command: /usr/local/bin/rc admin user info local/ {{ rustfs_ak }} --json
+  register: rustfs_user
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Create user {{ rustfs_ak }}
+  ansible.builtin.command: /usr/local/bin/rc admin user add local/ {{ rustfs_ak }} {{ rustfs_sk }}
+  when: rustfs_user.rc != 0
+  changed_when: true
+  no_log: true
+
+- name: Check the secret key of {{ rustfs_ak }}
+  ansible.builtin.command:
+    cmd: /usr/local/sbin/s3-auth-check
+    stdin: "{{ rustfs_ak }} {{ rustfs_sk }}"
+  register: rustfs_auth
+  when: rustfs_user.rc == 0
+  changed_when: false
+  failed_when: false             # in --check on a new host the helper is not there yet
+  check_mode: false
+  no_log: true
+
+- name: Reset the secret key of {{ rustfs_ak }}
+  ansible.builtin.command: /usr/local/bin/rc admin user passwd local/ {{ rustfs_ak }} --password-from-env RUSTFS_USER_SECRET
+  environment:
+    RUSTFS_USER_SECRET: "{{ rustfs_sk }}"
+  when: rustfs_user.rc == 0 and rustfs_auth.stdout != 'valid'
+  changed_when: true
+  no_log: true
+
+- name: Secret key file of {{ rustfs_ak }} on the host
+  ansible.builtin.copy:
+    content: "{{ rustfs_sk }}\n"
+    dest: "{{ rustfs_conf }}/users/{{ rustfs_ak }}-secret-key"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Read policy {{ user.policy_name }}
+  ansible.builtin.command: /usr/local/bin/rc admin policy info local/ {{ user.policy_name }} --json
+  register: rustfs_policy
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Write policy {{ user.policy_name }}
+  when: rustfs_policy.rc != 0 or (rustfs_policy.stdout | from_json).policy.policy != user.policy
+  block:
+    - name: Policy document
+      ansible.builtin.copy:
+        content: "{{ user.policy | to_json }}"
+        dest: "/tmp/{{ user.policy_name }}.json"
+        mode: "0600"
+
+    - name: Create or replace policy {{ user.policy_name }}
+      ansible.builtin.command: /usr/local/bin/rc admin policy create local/ {{ user.policy_name }} /tmp/{{ user.policy_name }}.json
+      changed_when: true
+
+    - name: Remove the policy document
+      ansible.builtin.file:
+        path: "/tmp/{{ user.policy_name }}.json"
+        state: absent
+
+- name: Attach policy {{ user.policy_name }} to {{ rustfs_ak }}
+  ansible.builtin.command: /usr/local/bin/rc admin policy attach local/ {{ user.policy_name }} --user {{ rustfs_ak }}
+  when: rustfs_user.rc != 0 or user.policy_name not in (rustfs_user.stdout | from_json).policies | default([])
+  changed_when: true

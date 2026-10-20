@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+"""Put an access token with a known value into Forgejo's SQLite database
+(a server rebuilt after the token was handed out, e.g. to a cluster through
+gitops). Usage: forgejo-import-token DB USER NAME SCOPE < token
+Replaces the user's token of that NAME. Same hashing as Forgejo
+(models/auth: PBKDF2-SHA256, 10000 rounds, 50 bytes, per-token salt)."""
+import hashlib
+import secrets
+import sqlite3
+import string
+import sys
+import time
+
+db, user, name, scope = sys.argv[1:5]
+token = sys.stdin.read().strip()
+salt = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(10))
+digest = hashlib.pbkdf2_hmac("sha256", token.encode(), salt.encode(), 10000, 50).hex()
+now = int(time.time())
+c = sqlite3.connect(db, timeout=30)
+row = c.execute("SELECT id FROM user WHERE lower_name = ?", (user.lower(),)).fetchone()
+if not row:
+    sys.exit(f"no user {user}")
+c.execute("DELETE FROM access_token WHERE uid = ? AND name = ?", (row[0], name))
+c.execute("INSERT INTO access_token (uid, name, token_hash, token_salt, token_last_eight, scope, created_unix, updated_unix)"
+          " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (row[0], name, digest, salt, token[-8:], scope, now, now))
+c.commit()

@@ -1,0 +1,25 @@
+# Settings for opnsense-dns.py (no secrets in here). Copy this file, adjust it,
+# and pass it with --config FILE or OPNSENSE_DNS_CONFIG=FILE (or save it as
+# opnsense-dns.yaml next to the script). Relative paths are relative to this file.
+
+# OPNsense web GUI / API base URL, no path. Use the GUI's port.
+url: https://192.0.2.1:443
+
+# OPNsense apikey.txt (key=... / secret=...), mode 600, kept out of git. The
+# key's user needs the privilege "Services: Dnsmasq DNS/DHCP: Settings".
+keyFile: /path/to/opnsense-api-key.txt
+
+# Exactly one of:
+# - the SHA-256 fingerprint of the API's self-signed certificate (pinned):
+#     echo | openssl s_client -connect 192.0.2.1:443 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+tlsFingerprint: 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF
+# - a CA file, when the API's certificate is signed by a CA:
+# caFile: /path/to/root_ca.crt
+
+# Resolver the LAN uses; checked after every change (null: skip the check).
+dnsServer: 192.0.2.1
+dnsPort: 53
+# Dnsmasq's own port when another resolver (e.g. Unbound) answers on dnsPort
+# and forwards the domain to Dnsmasq; checked first and must show the new
+# state. null: only dnsPort is checked.
+dnsmasqPort: null

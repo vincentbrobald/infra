@@ -1,0 +1,5 @@
+# Omni settings that are secrets (the rest is in the unit's command line).
+# Managed by Ansible (role omni).
+auth:
+  oidc:
+    clientSecret: {{ omni_oidc_client_secret | to_json }}

@@ -1,0 +1,77 @@
+---
+# Read-only checkout of the gitops repository and the sops binary, for the
+# site_secret lookup: a credential already in gitops (SOPS) is used from
+# there. Imported by site.yml and by every service playbook.
+- name: Gitops checkout for site_secret
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    # site.yml imports this through every service playbook: once is enough.
+    - name: Already done in this run
+      ansible.builtin.meta: end_play
+      when: gitops_done | default(false)
+
+    - name: Cache directory
+      ansible.builtin.file:
+        path: "{{ site_sops_bin | dirname }}"
+        state: directory
+        mode: "0700"
+      check_mode: false            # a local cache; needed for --check
+
+    - name: sops {{ site_sops_version }} (checked against the release's checksums)
+      ansible.builtin.get_url:
+        url: "https://github.com/getsops/sops/releases/download/{{ site_sops_version }}/sops-{{ site_sops_version }}.linux.amd64"
+        dest: "{{ site_sops_bin }}"
+        checksum: "sha256:https://github.com/getsops/sops/releases/download/{{ site_sops_version }}/sops-{{ site_sops_version }}.checksums.txt"
+        mode: "0755"
+      check_mode: false
+
+    - name: Update the checkout
+      when: site_gitops_repo | length > 0
+      block:
+        - name: Clone or update {{ site_gitops_repo }}
+          ansible.builtin.git:
+            repo: "{{ site_gitops_repo }}"
+            dest: "{{ site_gitops_checkout }}"
+            version: main
+            key_file: "{{ site_gitops_ssh_key_file }}"
+            accept_hostkey: true
+            ssh_opts: -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+            force: true            # a cache: local changes are discarded
+          check_mode: false
+      rescue:
+        # The Git server may be the one being rebuilt: an earlier checkout
+        # still names the credentials gitops held then.
+        - name: Fall back to the previous checkout
+          ansible.builtin.stat:
+            path: "{{ site_gitops_checkout }}/.git"
+          register: gitops_previous
+
+        - name: Refuse to go on without any checkout
+          ansible.builtin.assert:
+            that: gitops_previous.stat.exists
+            fail_msg: >-
+              {{ site_gitops_repo }} is unreachable and there is no earlier checkout in
+              {{ site_gitops_checkout }}: credentials already in gitops could not be honoured.
+              Restore the repository, or set site_gitops_repo to "" with a checkout put there by hand.
+            quiet: true
+
+        - name: Warn about the stale checkout
+          ansible.builtin.debug:
+            msg: "WARNING: {{ site_gitops_repo }} unreachable; using the earlier checkout in {{ site_gitops_checkout }}"
+
+    - name: The checkout exists
+      ansible.builtin.stat:
+        path: "{{ site_gitops_checkout }}"
+      register: gitops_checkout
+
+    - name: Refuse to go on without a checkout
+      ansible.builtin.assert:
+        that: gitops_checkout.stat.isdir | default(false)
+        fail_msg: "no gitops checkout in {{ site_gitops_checkout }}"
+        quiet: true
+
+    - name: Done for this run
+      ansible.builtin.set_fact:
+        gitops_done: true

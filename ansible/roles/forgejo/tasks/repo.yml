@@ -1,0 +1,145 @@
+---
+- name: Look up owner {{ repo.owner }}
+  ansible.builtin.uri:
+    url: "{{ forgejo_api }}/users/{{ repo.owner }}"
+    url_username: "{{ forgejo_as_admin.url_username }}"
+    url_password: "{{ forgejo_as_admin.url_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: forgejo_owner
+  check_mode: false              # read-only; needed for --check
+
+- name: Skip {{ repo.owner }}/{{ repo.name }} (no user {{ repo.owner }} yet)
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ repo.owner }} does not exist on {{ forgejo_hostname }} (a Keycloak user exists after
+      their first login): {{ repo.owner }}/{{ repo.name }} skipped; re-run afterwards.
+  when: forgejo_owner.status == 404
+
+- name: Repository {{ repo.owner }}/{{ repo.name }}
+  when: forgejo_owner.status == 200
+  vars:
+    r: "{{ forgejo_api }}/repos/{{ repo.owner }}/{{ repo.name }}"
+  block:
+    - name: Look up {{ repo.owner }}/{{ repo.name }}
+      ansible.builtin.uri:
+        url: "{{ r }}"
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+        status_code: [200, 404]
+      register: forgejo_repo
+      check_mode: false
+
+    - name: Create {{ repo.owner }}/{{ repo.name }} (empty)
+      ansible.builtin.uri:
+        url: "{{ forgejo_api }}/admin/users/{{ repo.owner }}/repos"
+        method: POST
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+        body_format: json
+        body: {name: "{{ repo.name }}", private: "{{ repo.private | default(true) }}"}
+        status_code: 201
+      when: forgejo_repo.status == 404
+      changed_when: true
+
+    - name: Collaborators
+      ansible.builtin.uri:
+        url: "{{ r }}/collaborators/{{ item.user }}/permission"
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+        status_code: [200, 403, 404]
+      loop: "{{ repo.collaborators | default([]) }}"
+      loop_control:
+        label: "{{ item.user }}"
+      register: forgejo_collab
+      check_mode: false
+
+    - name: Add or update collaborators
+      ansible.builtin.uri:
+        url: "{{ r }}/collaborators/{{ item.item.user }}"
+        method: PUT
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+        body_format: json
+        body: {permission: "{{ item.item.permission }}"}
+        status_code: 204
+      loop: "{{ forgejo_collab.results }}"
+      loop_control:
+        label: "{{ item.item.user }} ({{ item.item.permission }})"
+      # owner: what Forgejo reports for a site admin (crossplane-lab) or the
+      # repository's owner, who have every permission already.
+      when: item.status != 200 or item.json.permission not in [item.item.permission, 'owner']
+      changed_when: true
+
+    - name: Deploy keys
+      ansible.builtin.uri:
+        url: "{{ r }}/keys"
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+      register: forgejo_keys
+      check_mode: false
+
+    # Matched on the key itself (type and base64, not the comment); one with
+    # another access level is replaced.
+    - name: Add deploy keys
+      ansible.builtin.include_tasks: deploy_key.yml
+      loop: "{{ repo.deploy_keys | default([]) }}"
+      loop_control:
+        loop_var: deploy_key
+        label: "{{ deploy_key.title }}"
+
+    - name: Webhooks
+      ansible.builtin.uri:
+        url: "{{ r }}/hooks"
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+      register: forgejo_hooks
+      check_mode: false
+
+    - name: Add or update webhooks
+      ansible.builtin.include_tasks: webhook.yml
+      loop: "{{ repo.webhooks | default([]) }}"
+      loop_control:
+        loop_var: hook
+        label: "{{ hook.url }}"
+
+    # A webhook moved to a new URL lists the old one under "replaces": the
+    # hook with that URL is deleted once the new one exists.
+    - name: Remove replaced webhooks
+      ansible.builtin.uri:
+        url: "{{ r }}/hooks/{{ old.id }}"
+        method: DELETE
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+        status_code: 204
+      loop: >-
+        {{ forgejo_hooks.json | selectattr('config.url', 'in',
+           repo.webhooks | default([]) | map(attribute='replaces', default=[]) | flatten) | list }}
+      loop_control:
+        loop_var: old
+        label: "{{ old.config.url }}"
+      changed_when: true
+
+    - name: Branch protections
+      ansible.builtin.uri:
+        url: "{{ r }}/branch_protections"
+        url_username: "{{ forgejo_as_admin.url_username }}"
+        url_password: "{{ forgejo_as_admin.url_password }}"
+        force_basic_auth: true
+      register: forgejo_protections
+      check_mode: false
+      when: repo.branch_protections is defined
+
+    - name: Add or update branch protections
+      ansible.builtin.include_tasks: branch_protection.yml
+      loop: "{{ repo.branch_protections | default([]) }}"
+      loop_control:
+        loop_var: rule
+        label: "{{ rule.rule_name }}"
