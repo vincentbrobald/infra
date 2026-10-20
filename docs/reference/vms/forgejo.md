@@ -63,6 +63,7 @@ From gitops `clusters/lab/ci/<repo>/repository.yaml`:
 | `alice/pac-demo` (ID 8) | collaborator `pac-bot` (write), webhook to Pipelines-as-Code |
 | `alice/gitops-scanner` (ID 10) | collaborator `pac-bot` (write), webhook, deploy key `push` |
 | `alice/provider-artifact-keeper` (ID 19) | collaborator `pac-bot` (write), webhook |
+| `alice/talos-install` (ID 2), `alice/infra` (ID 7), `alice/lb` (ID 9) | collaborator `pac-bot` (write), webhook |
 
 Webhook config (url, content type, secret) from Secret `forgejo-webhook` in
 each namespace, the same secret as `forgejo-pac`'s `webhook.secret`.
