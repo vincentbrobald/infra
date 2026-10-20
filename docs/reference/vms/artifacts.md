@@ -57,5 +57,5 @@ makes admins.
 | `db-password` | PostgreSQL |
 | `jwt-secret` | signs sessions (changing it signs everyone out) |
 | `webhook-key` | encrypts webhook secrets in the database (keep it) |
-| `crossplane-lab-token` | the admin API token Crossplane uses (no expiry; also gitops `crossplane-system/artifact-keeper-credentials`) |
+| `crossplane-lab-token` | the admin API token Crossplane uses (no expiry; made by `artifacts.yml` when neither it nor gitops `crossplane-system/artifact-keeper-credentials` exists, which wins) |
 | `peer-api-key` | replication between instances (unused; pinned) |

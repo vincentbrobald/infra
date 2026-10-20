@@ -115,3 +115,46 @@
   retries: 60
   delay: 5
   check_mode: false
+
+# Crossplane's API token: from gitops or its file, else made with the admin's
+# login (once: Artifact Keeper rate-limits logins) and written to the file;
+# bootstrap.py (gitops tools/) puts it in Git.
+- name: Crossplane's API token
+  ansible.builtin.set_fact:
+    artifact_keeper_crossplane_token: >-
+      {{ lookup('site_secret', artifact_keeper_crossplane_token_file, optional=true,
+                topic=artifact_keeper_crossplane_token_gitops.topic | default(None),
+                key=artifact_keeper_crossplane_token_gitops.key | default(None)) }}
+  no_log: true
+
+- name: Make Crossplane's API token ({{ artifact_keeper_crossplane_token_name }})
+  when: artifact_keeper_crossplane_token | length == 0 and not ansible_check_mode
+  block:
+    - name: Log in as admin
+      ansible.builtin.uri:
+        url: "https://{{ artifact_keeper_hostname }}/api/v1/auth/login"
+        method: POST
+        body_format: json
+        body: {username: admin, password: "{{ artifact_keeper_admin_password }}"}
+      register: artifact_keeper_login
+      no_log: true
+
+    - name: Create the token
+      ansible.builtin.uri:
+        url: "https://{{ artifact_keeper_hostname }}/api/v1/users/me/tokens"
+        method: POST
+        headers: {Authorization: "Bearer {{ artifact_keeper_login.json.access_token }}"}
+        body_format: json
+        body: {name: "{{ artifact_keeper_crossplane_token_name }}", scopes: ["*"]}
+      register: artifact_keeper_new_token
+      changed_when: true
+      no_log: true
+
+    - name: Write it to {{ artifact_keeper_crossplane_token_file }}
+      ansible.builtin.copy:
+        content: "{{ artifact_keeper_new_token.json.token }}\n"
+        dest: "{{ site_secrets_dir }}/{{ artifact_keeper_crossplane_token_file }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true

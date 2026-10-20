@@ -44,6 +44,11 @@ artifact_keeper_db_password_file: artifacts/db-password
 artifact_keeper_jwt_secret_file: artifacts/jwt-secret          # signs sessions
 artifact_keeper_webhook_key_file: artifacts/webhook-key        # encrypts webhook secrets (32 bytes)
 artifact_keeper_peer_api_key_file: artifacts/peer-api-key      # replication between instances (unused; else a new one at each start)
+# Crossplane's API token (provider-artifact-keeper): an API token of the
+# admin, no expiry, made once when neither gitops nor the file has one.
+artifact_keeper_crossplane_token_name: crossplane-lab
+artifact_keeper_crossplane_token_file: artifacts/crossplane-lab-token
+artifact_keeper_crossplane_token_gitops: {topic: crossplane-system/artifact-keeper-credentials, key: token}
 
 # Paths the backend serves (the rest is the web UI): its API and the
 # package formats' endpoints, as in the project's own docker/Caddyfile.
