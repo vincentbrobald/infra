@@ -44,25 +44,37 @@ from pathlib import Path
 import yaml
 
 PROG = "opnsense-dns.py"
+# Prefix of the description of every entry this tool manages; the owner follows it.
 TAG = "managed-by:"
 CONFIG_ENV = "OPNSENSE_DNS_CONFIG"
 DEFAULT_CONFIG = Path(__file__).resolve().with_name("opnsense-dns.yaml")
 
 
 def default_config() -> Path:
+    """The settings file when --config is not given: $OPNSENSE_DNS_CONFIG, else opnsense-dns.yaml here."""
     env = os.environ.get(CONFIG_ENV, "")
     return Path(env).expanduser() if env else DEFAULT_CONFIG
 
 
 class DnsError(Exception):
+    """An error to report as "ERROR: ..." with exit status 1."""
     pass
 
 
 def log(msg: str) -> None:
+    """Print a progress line ("==> msg") on stdout."""
     print(f"==> {msg}", flush=True)
 
 
 def load_settings(path: Path) -> dict:
+    """Read and check the settings file path; return them normalised.
+
+    The URL loses a trailing slash, the fingerprint its colons and case,
+    keyFile and caFile become paths (relative ones to the file's directory);
+    dnsServer and dnsmasqPort default to None, dnsPort to 53. Raises DnsError
+    for a missing or unreadable file, an unknown key, a missing url or keyFile,
+    a URL with a path, or not exactly one of tlsFingerprint and caFile.
+    """
     try:
         s = yaml.safe_load(path.read_text()) or {}
     except FileNotFoundError:
@@ -99,7 +111,11 @@ def load_settings(path: Path) -> dict:
 
 
 def read_api_key(path: Path) -> tuple[str, str]:
-    """OPNsense's apikey.txt (key=... / secret=...), or two lines: key, secret."""
+    """Return (key, secret) from OPNsense's apikey.txt (key=... / secret=...), or two lines: key, secret.
+
+    Raises DnsError if the file can't be read or holds neither form; warns on
+    stderr when group or others have any permission on it.
+    """
     try:
         lines = [l.strip() for l in path.read_text().splitlines() if l.strip()]
     except OSError as e:
@@ -119,7 +135,15 @@ def read_api_key(path: Path) -> tuple[str, str]:
 
 
 class OPNsense:
+    """OPNsense's API for Dnsmasq host entries, with the API key of the settings.
+
+    Each call opens its own HTTPS connection. Methods raise DnsError on any
+    failure.
+    """
+
     def __init__(self, s: dict):
+        """Read the API key and prepare TLS from settings s (load_settings()): verification
+        against caFile, or no CA verification and the certificate's pinned fingerprint."""
         self.url = s["url"]
         key, secret = read_api_key(s["keyFile"])
         self.auth = "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
@@ -133,6 +157,11 @@ class OPNsense:
             self.pin = s["tlsFingerprint"]
 
     def connect(self) -> http.client.HTTPSConnection:
+        """Open a connection to the API; with a pinned fingerprint, check the certificate first.
+
+        Raises DnsError (with the command to read the new fingerprint) on a
+        mismatch, OSError when the host can't be reached.
+        """
         host, _, port = self.url.removeprefix("https://").partition(":")
         conn = http.client.HTTPSConnection(host, int(port or 443), timeout=30, context=self.ctx)
         conn.connect()
@@ -151,6 +180,11 @@ class OPNsense:
         return conn
 
     def call(self, method: str, path: str, body: dict | None = None) -> dict:
+        """Send body as JSON (a POST without one sends {}) and return the decoded answer.
+
+        Raises DnsError when OPNsense can't be reached, answers HTTP 400 or more
+        (with a hint for 401 and 403), or doesn't answer JSON.
+        """
         data = json.dumps(body).encode() if body is not None else (b"{}" if method == "POST" else None)
         headers = {"Authorization": self.auth, "Content-Type": "application/json", "User-Agent": PROG}
         try:
@@ -174,37 +208,48 @@ class OPNsense:
             raise DnsError(f"OPNsense {method} {path}: not a JSON answer (wrong URL or port?)") from None
 
     def hosts(self) -> list[dict]:
+        """All of Dnsmasq's host entries (rowCount -1: no paging), as the API's rows."""
         d = self.call("POST", "/api/dnsmasq/settings/search_host",
                       {"current": 1, "rowCount": -1, "searchPhrase": ""})
         return d.get("rows", [])
 
     def save(self, path: str, entry: dict) -> None:
+        """POST a host entry to the add or set endpoint path; DnsError unless OPNsense saved it."""
         d = self.call("POST", path, {"host": entry})
         if d.get("result") != "saved":
             raise DnsError(f"OPNsense rejected {entry.get('host')}.{entry.get('domain')}: "
                            f"{d.get('validations') or d}")
 
     def add(self, entry: dict) -> None:
+        """Add a host entry (not applied until apply())."""
         self.save("/api/dnsmasq/settings/add_host", entry)
 
     def update(self, uuid: str, entry: dict) -> None:
+        """Replace host entry uuid with entry (not applied until apply())."""
         self.save(f"/api/dnsmasq/settings/set_host/{uuid}", entry)
 
     def delete(self, uuid: str) -> None:
+        """Delete host entry uuid (not applied until apply()); DnsError unless OPNsense deleted it."""
         d = self.call("POST", f"/api/dnsmasq/settings/del_host/{uuid}")
         if d.get("result") != "deleted":
             raise DnsError(f"OPNsense did not delete host entry {uuid}: {d}")
 
     def apply(self) -> None:
+        """Reconfigure Dnsmasq so that the saved entries take effect; DnsError unless it reports ok."""
         d = self.call("POST", "/api/dnsmasq/service/reconfigure")
         if d.get("status", "").strip().lower() != "ok":
             raise DnsError(f"OPNsense could not apply the Dnsmasq configuration: {d}")
 
 
+# One lower-case DNS label: letters, digits and inner hyphens, 1 to 63 characters.
 LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
 
 
 def split_name(name: str) -> tuple[str, str]:
+    """Split a record name, lower-cased and without a final dot, into (host, domain) at the first dot.
+
+    host is a label or "*"; domain one or more labels. Raises DnsError otherwise.
+    """
     name = name.lower().rstrip(".")
     host, _, domain = name.partition(".")
     if not domain or not re.fullmatch(rf"({LABEL}\.)*{LABEL}", domain) or \
@@ -214,6 +259,13 @@ def split_name(name: str) -> tuple[str, str]:
 
 
 def load_records(source: str) -> tuple[str, list[dict]]:
+    """Read the records JSON from file source ("-": standard input) and return (owner, entries).
+
+    entries are {"host", "domain", "ip"} dicts, one per distinct name (a name
+    given twice with the same address counts once). Raises DnsError for
+    unreadable input, invalid JSON, an invalid owner, a record that isn't type
+    A with an IPv4 address, or a name given twice with different addresses.
+    """
     try:
         text = sys.stdin.read() if source == "-" else Path(source).read_text()
     except OSError as e:
@@ -245,20 +297,32 @@ def load_records(source: str) -> tuple[str, list[dict]]:
 
 
 def fqdn(e: dict) -> str:
+    """The full name host.domain of an entry or API row."""
     return f"{e['host']}.{e['domain']}"
 
 
 def owner_of(row: dict) -> str | None:
+    """The owner tagged in a row's description, None for an entry this tool doesn't manage."""
     descr = row.get("descr") or ""
     return descr[len(TAG):] if descr.startswith(TAG) else None
 
 
 def row_ip(row: dict) -> str:
+    """A row's address as text; the API may give a list, which is joined with commas."""
     ip = row.get("ip", "")
     return ",".join(ip) if isinstance(ip, list) else str(ip)
 
 
 def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
+    """Ask server:port over UDP for the A records of name; return their addresses.
+
+    [] means an answer without A records (e.g. NXDOMAIN); None no answer within
+    3 seconds, a network error, or an answer to another query. A minimal
+    resolver: no retries, no TCP fallback, and the response is assumed
+    well-formed (a truncated one raises).
+    """
+    # Header: random id, flags 0x0100 (recursion desired), one question. The
+    # question: the name as length-prefixed labels, a 0 byte, type A, class IN.
     tid = random.randint(0, 65535)
     pkt = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
     pkt += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0" + struct.pack(">HH", 1, 1)
@@ -272,11 +336,16 @@ def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
     if len(d) < 12 or struct.unpack(">H", d[:2])[0] != tid:
         return None
     ancount = struct.unpack(">H", d[6:8])[0]
+    # Skip the echoed question: its labels, the final 0 byte, type and class.
     i = 12
     while d[i]:
         i += d[i] + 1
     i += 5
     out = []
+    # Each answer: its name (a 2-byte compression pointer, or plain labels
+    # ending in a 0 byte; labels followed by a pointer are not handled), then
+    # type, class, TTL and data length (10 bytes), then the data. Only type A
+    # (1) data, 4 bytes, is kept; CNAMEs and others are skipped.
     for _ in range(ancount):
         if d[i] & 0xC0 == 0xC0:
             i += 2
@@ -293,16 +362,26 @@ def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
 
 
 def resolves(name: str, ip: str | None, server: str, port: int) -> bool:
+    """Whether name resolves through server:port to exactly ip (None: to no address).
+
+    A wildcard is checked through a random name below it ("*" -> probe-<n>).
+    """
     probe = name.replace("*", f"probe-{random.randint(0, 10**6)}")
     got = query_a(probe, server, port)
     return got == ([ip] if ip else [])
 
 
 def verify(records: list[dict], settings: dict, removed: list[str] = (), timeout: int = 60) -> None:
-    """Dnsmasq itself (dnsmasqPort) must answer
+    """Check through dnsServer that the records resolve and the removed names don't.
+
+    Dnsmasq itself (dnsmasqPort) must answer
     exactly the new state: an error otherwise. The LAN resolver (dnsPort, e.g.
     Unbound forwarding to Dnsmasq) is checked too, but it may serve an older
-    answer from its cache until the TTL runs out: only a warning."""
+    answer from its cache until the TTL runs out: only a warning. Without a
+    dnsmasqPort, dnsPort is the one that must answer (an error otherwise).
+    Each name is retried every 3 seconds, for timeout seconds where an error
+    is due, 10 seconds where only a warning. Without dnsServer nothing is checked.
+    """
     server = settings.get("dnsServer")
     if not server:
         return
@@ -331,6 +410,7 @@ def verify(records: list[dict], settings: dict, removed: list[str] = (), timeout
 
 
 def cmd_list(api: OPNsense, args) -> None:
+    """The list command: print a table of the managed entries (--owner: one owner's; --all: every entry)."""
     rows = api.hosts()
     shown = [r for r in rows if args.all or (owner_of(r) and (not args.owner or owner_of(r) == args.owner))]
     if not shown:
@@ -345,6 +425,13 @@ def cmd_list(api: OPNsense, args) -> None:
 
 
 def plan_changes(rows: list[dict], owner: str, wanted: list[dict], adopt: bool):
+    """Compare the API's rows with the wanted entries of owner; return (adds, updates, deletes, conflicts).
+
+    updates are (row, wanted entry) pairs; deletes are rows; conflicts are
+    messages. A name held by another owner, or by an unmanaged entry without
+    adopt, is a conflict. With adopt, unmanaged entries of a wanted name are
+    taken over (tagged with owner). Names are matched case-insensitively.
+    """
     by_key: dict[tuple[str, str], list[dict]] = {}
     for r in rows:
         by_key.setdefault((r["host"].lower(), r["domain"].lower()), []).append(r)
@@ -358,6 +445,10 @@ def plan_changes(rows: list[dict], owner: str, wanted: list[dict], adopt: bool):
             who = ", ".join(owner_of(r) or "not managed by this tool" for r in others)
             conflicts.append(f"{fqdn(e)} already exists ({who})")
             continue
+        # The first matching row is kept (updated if its address or tag
+        # differs); any other row of owner for the name is deleted below, as
+        # are owner's rows for names no longer wanted. Adopted duplicates
+        # beyond the first are left alone (they carry no tag).
         targets = mine + (others if adopt else [])
         if targets:
             first = targets[0]
@@ -371,10 +462,17 @@ def plan_changes(rows: list[dict], owner: str, wanted: list[dict], adopt: bool):
 
 
 def entry(e: dict, owner: str) -> dict:
+    """The API host entry for wanted entry e, tagged with owner."""
     return {"host": e["host"], "domain": e["domain"], "ip": e["ip"], "descr": f"{TAG}{owner}"}
 
 
 def cmd_sync(api: OPNsense, settings: dict, args) -> None:
+    """The sync command: plan, print and (unless --dry-run) apply the changes, then verify (unless --no-verify).
+
+    Nothing is changed when there is a conflict (DnsError). The configuration
+    is applied only when something changed; names deleted and not re-added
+    are verified as gone.
+    """
     owner, wanted = load_records(args.input)
     rows = api.hosts()
     adds, updates, deletes, conflicts = plan_changes(rows, owner, wanted, args.adopt)
@@ -409,6 +507,7 @@ def cmd_sync(api: OPNsense, settings: dict, args) -> None:
 
 
 def cmd_remove(api: OPNsense, settings: dict, args) -> None:
+    """The remove command: delete every entry of --owner, apply, and verify the names are gone."""
     rows = [r for r in api.hosts() if owner_of(r) == args.owner]
     if not rows:
         log(f"No host entries owned by {args.owner}")
@@ -427,6 +526,7 @@ def cmd_remove(api: OPNsense, settings: dict, args) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """The command line parser: global --config and the sync, remove and list commands."""
     parser = argparse.ArgumentParser(
         prog=PROG, formatter_class=argparse.RawDescriptionHelpFormatter,
         description="Register cluster DNS records as Dnsmasq host entries on OPNsense.",
@@ -471,6 +571,7 @@ exit status: 0 success, 1 error (printed as ERROR: ...)""")
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the command; return 0, or 1 after printing a DnsError (argparse exits 2 on usage errors)."""
     args = build_parser().parse_args(argv)
     try:
         settings = load_settings(args.config or default_config())

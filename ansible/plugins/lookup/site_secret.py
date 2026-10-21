@@ -47,10 +47,16 @@ from ansible.utils.display import Display
 
 display = Display()
 
+# Decrypted Secret values by file path, so that each file is decrypted once
+# per process (one ansible-playbook run).
 _DECRYPTED: dict[str, dict] = {}
 
 
 def _generate(spec: str) -> str:
+    """Return a new random value as spec says (hex:N, base64:N or alnum:N, N >= 8 bytes or characters).
+
+    Raises AnsibleError for any other spec.
+    """
     kind, _, n = spec.partition(":")
     if not n.isdigit() or int(n) < 8:
         raise AnsibleError(f"site_secret: generate must be hex:N, base64:N or alnum:N with N >= 8, not {spec!r}")
@@ -65,6 +71,11 @@ def _generate(spec: str) -> str:
 
 
 def _write(path: Path, value: str) -> None:
+    """Write value and a newline to path, replacing its content.
+
+    A new file gets mode 0600 and missing directories 0700; an existing file
+    keeps its mode.
+    """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -72,10 +83,15 @@ def _write(path: Path, value: str) -> None:
 
 
 class LookupModule(LookupBase):
+    """The site_secret lookup (see DOCUMENTATION)."""
 
     def _gitops_files(self, checkout: Path, topic: str) -> list[Path]:
-        """Only data and
-        stringData are encrypted, so names are read without decrypting."""
+        """Return the *.enc.yaml files of checkout (outside .git) holding Secret topic
+        (namespace/name; no namespace counts as "default"), sorted.
+
+        Only data and stringData are encrypted, so names are read without
+        decrypting; unreadable or invalid files are skipped.
+        """
         ns, _, name = topic.partition("/")
         found = []
         for p in sorted(checkout.rglob("*.enc.yaml")):
@@ -93,6 +109,12 @@ class LookupModule(LookupBase):
         return found
 
     def _decrypt(self, path: Path, sops: str, age_key: str) -> dict:
+        """Return the values of the SOPS-encrypted Secret in path, data base64-decoded and
+        stringData (which wins on a shared key) as strings.
+
+        sops runs with SOPS_AGE_KEY_FILE=age_key; the result is cached in
+        _DECRYPTED. Raises AnsibleError if sops fails.
+        """
         if str(path) not in _DECRYPTED:
             p = subprocess.run([sops, "decrypt", "--input-type", "yaml", "--output-type", "yaml", str(path)],
                                capture_output=True, text=True, env={**os.environ, "SOPS_AGE_KEY_FILE": age_key},
@@ -106,6 +128,12 @@ class LookupModule(LookupBase):
         return _DECRYPTED[str(path)]
 
     def _from_gitops(self, variables: dict, topic: str, key: str) -> str | None:
+        """Return the value of key in Secret topic in the gitops checkout, or None when no
+        Secret there has it or site_gitops_checkout is unset.
+
+        Every cluster folder is searched. Raises AnsibleError when the checkout is
+        missing or the copies of the Secret disagree on the value.
+        """
         checkout = self._templar.template(variables.get("site_gitops_checkout", ""))
         if not checkout:
             return None
@@ -126,6 +154,12 @@ class LookupModule(LookupBase):
         return next(iter(values.values()), None)
 
     def run(self, terms, variables=None, **kwargs):
+        """Return one credential per term (a file path), as DOCUMENTATION describes.
+
+        Precedence: the gitops value (the file is rewritten to match, the old
+        content backed up), the file, optional's empty string, default, generate.
+        Raises AnsibleError when nothing applies or the value is empty.
+        """
         self.set_options(var_options=variables, direct=kwargs)
         topic, key = self.get_option("topic"), self.get_option("key")
         generate, default = self.get_option("generate"), self.get_option("default")
