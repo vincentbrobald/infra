@@ -53,7 +53,7 @@ restore the dump (`sudo -u postgres pg_restore -c -d keycloak <dump>`).
 3. Check: `/api/v1/version` shows the version; the login page still offers
    Keycloak; a clone and a push over SSH, a clone over HTTPS; a push to a
    repository with a pipeline starts it (the webhook); Crossplane's Forgejo
-   objects stay Ready (`kubectl get managed`).
+   objects stay Ready (`kubectl get managed -A`).
 
 To go back: set the previous version and run `forgejo.yml` again; if the
 database was migrated, restore the dump on a rebuilt VM
