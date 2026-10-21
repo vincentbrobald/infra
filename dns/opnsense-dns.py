@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Register cluster DNS records as Dnsmasq host entries on OPNsense.
-
-Takes the JSON printed by `deploy-talos.py dns-records` (or any tool that
+"""Takes the JSON printed by `deploy-talos.py dns-records` (or any tool that
 prints the same):
 
     {"owner": "deploy-talos.py:lab",
@@ -65,10 +63,6 @@ def log(msg: str) -> None:
     print(f"==> {msg}", flush=True)
 
 
-# --------------------------------------------------------------------------
-# Settings
-# --------------------------------------------------------------------------
-
 def load_settings(path: Path) -> dict:
     try:
         s = yaml.safe_load(path.read_text()) or {}
@@ -125,10 +119,6 @@ def read_api_key(path: Path) -> tuple[str, str]:
     return kv["key"], kv["secret"]
 
 
-# --------------------------------------------------------------------------
-# OPNsense API
-# --------------------------------------------------------------------------
-
 class OPNsense:
     def __init__(self, s: dict):
         self.url = s["url"]
@@ -138,8 +128,6 @@ class OPNsense:
             self.ctx = ssl.create_default_context(cafile=str(s["caFile"]))
             self.pin = None
         else:
-            # Pinned self-signed certificate: no CA chain or name check, but
-            # the exact certificate must match (checked on every connection).
             self.ctx = ssl.create_default_context()
             self.ctx.check_hostname = False
             self.ctx.verify_mode = ssl.CERT_NONE
@@ -209,15 +197,10 @@ class OPNsense:
             raise DnsError(f"OPNsense could not apply the Dnsmasq configuration: {d}")
 
 
-# --------------------------------------------------------------------------
-# Records
-# --------------------------------------------------------------------------
-
 LABEL = r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
 
 
 def split_name(name: str) -> tuple[str, str]:
-    """api.b.c -> (api, b.c); *.apps.b.c -> (*, apps.b.c)."""
     name = name.lower().rstrip(".")
     host, _, domain = name.partition(".")
     if not domain or not re.fullmatch(rf"({LABEL}\.)*{LABEL}", domain) or \
@@ -271,12 +254,7 @@ def row_ip(row: dict) -> str:
     return ",".join(ip) if isinstance(ip, list) else str(ip)
 
 
-# --------------------------------------------------------------------------
-# Verification through DNS
-# --------------------------------------------------------------------------
-
 def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
-    """A records of name from server (None: no answer / timeout)."""
     tid = random.randint(0, 65535)
     pkt = struct.pack(">HHHHHH", tid, 0x0100, 1, 0, 0, 0)
     pkt += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0" + struct.pack(">HH", 1, 1)
@@ -311,14 +289,13 @@ def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
 
 
 def resolves(name: str, ip: str | None, server: str, port: int) -> bool:
-    """name (wildcards: a random name below them) answers [ip], or nothing if ip is None."""
     probe = name.replace("*", f"probe-{random.randint(0, 10**6)}")
     got = query_a(probe, server, port)
     return got == ([ip] if ip else [])
 
 
 def verify(records: list[dict], settings: dict, removed: list[str] = (), timeout: int = 60) -> None:
-    """Check the result through DNS. Dnsmasq itself (dnsmasqPort) must answer
+    """Dnsmasq itself (dnsmasqPort) must answer
     exactly the new state: an error otherwise. The LAN resolver (dnsPort, e.g.
     Unbound forwarding to Dnsmasq) is checked too, but it may serve an older
     answer from its cache until the TTL runs out: only a warning."""
@@ -349,10 +326,6 @@ def verify(records: list[dict], settings: dict, removed: list[str] = (), timeout
               "answer expires (Dnsmasq's local TTL, 15 minutes by default on OPNsense).", file=sys.stderr)
 
 
-# --------------------------------------------------------------------------
-# Commands
-# --------------------------------------------------------------------------
-
 def cmd_list(api: OPNsense, args) -> None:
     rows = api.hosts()
     shown = [r for r in rows if args.all or (owner_of(r) and (not args.owner or owner_of(r) == args.owner))]
@@ -368,7 +341,6 @@ def cmd_list(api: OPNsense, args) -> None:
 
 
 def plan_changes(rows: list[dict], owner: str, wanted: list[dict], adopt: bool):
-    """(adds, updates, deletes, conflicts) to make owner's entries equal wanted."""
     by_key: dict[tuple[str, str], list[dict]] = {}
     for r in rows:
         by_key.setdefault((r["host"].lower(), r["domain"].lower()), []).append(r)
@@ -388,8 +360,6 @@ def plan_changes(rows: list[dict], owner: str, wanted: list[dict], adopt: bool):
             keep.add(first["uuid"])
             if row_ip(first) != e["ip"] or owner_of(first) != owner:
                 updates.append((first, e))
-            # Further entries of this owner with the same name are not kept,
-            # so they end up in deletes below.
         else:
             adds.append(e)
     deletes = [r for r in rows if owner_of(r) == owner and r["uuid"] not in keep]

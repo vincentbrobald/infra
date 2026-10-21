@@ -22,7 +22,6 @@ step certificate create "$(jq -r '.subject.common_name[0]' <<<"$info")" "$tmp/in
     --ca-password-file "$STEPPATH/password.txt" \
     --key "$STEPPATH/secrets/intermediate_ca_key" --password-file "$STEPPATH/password.txt" \
     --not-after "$(jq -r '.validity.end' <<<"$info")" --force >/dev/null 2>&1
-# Same key, chains to the root, carries the constraint: only then swap it in.
 [[ $(openssl x509 -in "$tmp/intermediate.crt" -noout -pubkey) == $(openssl x509 -in "$INT" -noout -pubkey) ]] \
     || { echo "new intermediate has a different key" >&2; exit 1; }
 openssl verify -CAfile "$STEPPATH/certs/root_ca.crt" "$tmp/intermediate.crt" >/dev/null

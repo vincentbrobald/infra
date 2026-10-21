@@ -1,5 +1,3 @@
-# Lookup plugin: a site credential, from the gitops repository first, then
-# from its file in the secrets tree, else generated into that file.
 from __future__ import annotations
 
 DOCUMENTATION = r"""
@@ -49,7 +47,6 @@ from ansible.utils.display import Display
 
 display = Display()
 
-# Decrypted gitops Secrets, per worker process: {path: data}.
 _DECRYPTED: dict[str, dict] = {}
 
 
@@ -77,7 +74,7 @@ def _write(path: Path, value: str) -> None:
 class LookupModule(LookupBase):
 
     def _gitops_files(self, checkout: Path, topic: str) -> list[Path]:
-        """The encrypted files holding Secret <topic>. Only data and
+        """Only data and
         stringData are encrypted, so names are read without decrypting."""
         ns, _, name = topic.partition("/")
         found = []
