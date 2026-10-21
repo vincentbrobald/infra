@@ -317,9 +317,9 @@ def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
     """Ask server:port over UDP for the A records of name; return their addresses.
 
     [] means an answer without A records (e.g. NXDOMAIN); None no answer within
-    3 seconds, a network error, or an answer to another query. A minimal
-    resolver: no retries, no TCP fallback, and the response is assumed
-    well-formed (a truncated one raises).
+    3 seconds, a network error, an answer to another query, or one that can't be
+    parsed (truncated or malformed). A minimal resolver: no retries, no TCP
+    fallback.
     """
     # Header: random id, flags 0x0100 (recursion desired), one question. The
     # question: the name as length-prefixed labels, a 0 byte, type A, class IN.
@@ -335,27 +335,48 @@ def query_a(name: str, server: str, port: int = 53) -> list[str] | None:
             return None
     if len(d) < 12 or struct.unpack(">H", d[:2])[0] != tid:
         return None
-    ancount = struct.unpack(">H", d[6:8])[0]
-    # Skip the echoed question: its labels, the final 0 byte, type and class.
+    try:
+        return parse_a(d)
+    except (IndexError, struct.error):
+        return None
+
+
+def skip_name(d: bytes, i: int) -> int:
+    """Return the offset just past the domain name that starts at offset i of message d.
+
+    A name is length-prefixed labels ending either in a 0 byte or in a 2-byte
+    compression pointer (two top bits set, RFC 1035 4.1.4), which ends it too.
+    Raises IndexError when d ends inside the name.
+    """
+    while True:
+        n = d[i]
+        if n & 0xC0 == 0xC0:
+            return i + 2
+        if n == 0:
+            return i + 1
+        i += n + 1
+
+
+def parse_a(d: bytes) -> list[str]:
+    """Return the addresses of the A records in the answer section of DNS response d.
+
+    Skips the echoed question, then reads each answer: its name, type, class,
+    TTL and data length (10 bytes), then the data; only type A (1) data of 4
+    bytes is kept, CNAMEs and others are skipped. Raises IndexError or
+    struct.error on a truncated or malformed message.
+    """
+    qdcount, ancount = struct.unpack(">HH", d[4:8])
     i = 12
-    while d[i]:
-        i += d[i] + 1
-    i += 5
+    for _ in range(qdcount):
+        i = skip_name(d, i) + 4  # type and class
     out = []
-    # Each answer: its name (a 2-byte compression pointer, or plain labels
-    # ending in a 0 byte; labels followed by a pointer are not handled), then
-    # type, class, TTL and data length (10 bytes), then the data. Only type A
-    # (1) data, 4 bytes, is kept; CNAMEs and others are skipped.
     for _ in range(ancount):
-        if d[i] & 0xC0 == 0xC0:
-            i += 2
-        else:
-            while d[i]:
-                i += d[i] + 1
-            i += 1
+        i = skip_name(d, i)
         typ, _, _, length = struct.unpack(">HHIH", d[i:i + 10])
         i += 10
-        if typ == 1:
+        if i + length > len(d):
+            raise IndexError("answer data past the end of the message")
+        if typ == 1 and length == 4:
             out.append(socket.inet_ntoa(d[i:i + 4]))
         i += length
     return out
