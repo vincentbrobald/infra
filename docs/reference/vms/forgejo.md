@@ -11,7 +11,7 @@ repositories' content.
 |---|---|
 | VM | `forgejo`, 2 vCPU, 2 GiB, Fedora 44 (re-created by the playbook it would be AlmaLinux 10, same user and key) |
 | Address | 192.0.2.100 (DHCP, name registered by the router) |
-| Runs | Forgejo 16.0.5 on 127.0.0.1:8080 and SSH on :2222, behind Caddy |
+| Runs | Forgejo 16.0.6 on 127.0.0.1:8080 and SSH on :2222, behind Caddy |
 | Playbook | `ansible/forgejo.yml` (role `forgejo`; settings in `ansible/inventory/group_vars/forgejo.yml`) |
 | SSH (VM) | `ssh -i /root/lab/forgejo-test/vm/id_ed25519 fedora@forgejo.example.org` |
 | Git | `https://forgejo.example.org` (sign-in required for everything), `ssh://git@forgejo.example.org:2222/<owner>/<repo>.git` |

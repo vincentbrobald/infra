@@ -1,6 +1,6 @@
 ---
 # Forgejo (Git server) behind Caddy, SQLite database, SSH on its own port.
-forgejo_version: 16.0.5
+forgejo_version: 16.0.6
 forgejo_hostname: "{{ inventory_hostname }}"
 forgejo_app_name: Forgejo
 forgejo_ssh_port: 2222

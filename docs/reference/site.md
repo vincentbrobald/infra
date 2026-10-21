@@ -29,7 +29,7 @@ name.
 |---|---|---|---|---|---|
 | `pki` | pki.example.org | 192.0.2.162 | 1 vCPU, 1.5 GiB, 10 GB | step-ca 0.30.2 | [pki](vms/pki.md) |
 | `oauth` | oauth.example.org | 192.0.2.111 | 2 vCPU, 4 GiB, 20 GB | Keycloak 26.8.1, PostgreSQL 16, Caddy | [oauth](vms/oauth.md) |
-| `forgejo` | forgejo.example.org | 192.0.2.100 | 2 vCPU, 2 GiB | Forgejo 16.0.5, Caddy (Fedora 44) | [forgejo](vms/forgejo.md) |
+| `forgejo` | forgejo.example.org | 192.0.2.100 | 2 vCPU, 2 GiB | Forgejo 16.0.6, Caddy (Fedora 44) | [forgejo](vms/forgejo.md) |
 | `backup` | backup.example.org | 192.0.2.193 | 2 vCPU, 2 GiB, 60 GB | RustFS 1.0.1 (S3), Caddy | [backup](vms/backup.md) |
 | `registry` | registry.example.org | 192.0.2.136 | 4 vCPU, 8 GiB, 100 GB | Harbor 2.15.4, Caddy | [registry](vms/registry.md) |
 | `artifacts` | artifacts.example.org | 192.0.2.176 | 4 vCPU, 6 GiB, 60 GB | Artifact Keeper 1.10.2, PostgreSQL 18, Caddy | [artifacts](vms/artifacts.md) |

@@ -1,7 +1,10 @@
 ---
 # Tasks of upgrade.yml, for one VM at a time.
+# Also on its own, before upgrading Forgejo itself:
+#   ansible-playbook upgrade.yml --limit forgejo --tags forgejo-dump
 - name: Back up Forgejo first
   when: "'forgejo' in group_names and not ansible_check_mode"
+  tags: [forgejo-dump]
   block:
     - name: Dump Forgejo (repositories, database, configuration)
       ansible.builtin.command:
