@@ -18,8 +18,8 @@ DOMAIN=$1
 STEPPATH=${STEPPATH:-/etc/step-ca}
 INT=$STEPPATH/certs/intermediate_ca.crt
 # constrained CERT succeeds when a line of CERT's name constraints is exactly
-# "DNS:$DOMAIN" after indentation (dots in DOMAIN match any character in grep).
-constrained() { openssl x509 -in "$1" -noout -ext nameConstraints 2>/dev/null | grep -qx "\s*DNS:$DOMAIN"; }
+# "DNS:$DOMAIN" after indentation, compared literally.
+constrained() { openssl x509 -in "$1" -noout -ext nameConstraints 2>/dev/null | sed 's/^[[:space:]]*//' | grep -qxF "DNS:$DOMAIN"; }
 constrained "$INT" && exit 0
 # Template of the new intermediate: the current subject, CA usages, no
 # sub-CAs (maxPathLen 0) and a critical constraint permitting DOMAIN and its
