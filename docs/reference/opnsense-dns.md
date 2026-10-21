@@ -42,7 +42,7 @@ relative to the file.
 |---|---|---|
 | `url` | required | API base URL without path, e.g. `https://192.0.2.1:443`: the web GUI's port |
 | `keyFile` | required | OPNsense `apikey.txt` (`key=...`, `secret=...`), mode 600 |
-| `tlsFingerprint` | — | SHA-256 fingerprint of the API's self-signed certificate (pinned) |
+| `tlsFingerprint` | — | SHA-256 fingerprint of the API's self-signed certificate (pinned: checked on every connection, before the key is sent) |
 | `caFile` | — | instead of `tlsFingerprint`: CA of a CA-signed certificate |
 | `dnsServer` | `null` | resolver the LAN uses, checked after each change; `null` skips checks |
 | `dnsPort` | `53` | its port |

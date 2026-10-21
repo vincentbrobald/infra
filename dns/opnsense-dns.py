@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
 import random
@@ -38,8 +39,6 @@ import ssl
 import struct
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import yaml
@@ -132,38 +131,43 @@ class OPNsense:
             self.ctx.check_hostname = False
             self.ctx.verify_mode = ssl.CERT_NONE
             self.pin = s["tlsFingerprint"]
-        self.checked = False
 
-    def check_pin(self) -> None:
-        if self.pin is None or self.checked:
-            return
+    def connect(self) -> http.client.HTTPSConnection:
         host, _, port = self.url.removeprefix("https://").partition(":")
-        with socket.create_connection((host, int(port or 443)), timeout=10) as sock:
-            with self.ctx.wrap_socket(sock, server_hostname=host) as tls:
-                der = tls.getpeercert(binary_form=True)
-        got = hashlib.sha256(der).hexdigest()
+        conn = http.client.HTTPSConnection(host, int(port or 443), timeout=30, context=self.ctx)
+        conn.connect()
+        if self.pin is None:
+            return conn
+        # The pinned certificate is checked on the connection that then carries
+        # the API key, before anything is sent.
+        got = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest()
         if got != self.pin:
+            conn.close()
             pretty = ":".join(got[i:i + 2] for i in range(0, 64, 2)).upper()
             raise DnsError(f"the certificate of {self.url} does not match tlsFingerprint (it has {pretty}). "
                            "If OPNsense renewed its web certificate, check it and update opnsense-dns.yaml:\n"
                            f"  echo | openssl s_client -connect {host}:{port or 443} 2>/dev/null | "
                            "openssl x509 -noout -fingerprint -sha256")
-        self.checked = True
+        return conn
 
     def call(self, method: str, path: str, body: dict | None = None) -> dict:
-        self.check_pin()
         data = json.dumps(body).encode() if body is not None else (b"{}" if method == "POST" else None)
-        req = urllib.request.Request(self.url + path, data=data, method=method,
-                                     headers={"Authorization": self.auth, "Content-Type": "application/json",
-                                              "User-Agent": PROG})
+        headers = {"Authorization": self.auth, "Content-Type": "application/json", "User-Agent": PROG}
         try:
-            with urllib.request.urlopen(req, timeout=30, context=self.ctx) as r:
-                text = r.read()
-        except urllib.error.HTTPError as e:
-            hint = {401: " (wrong key/secret)", 403: " (the key's user lacks the Dnsmasq privilege)"}.get(e.code, "")
-            raise DnsError(f"OPNsense {method} {path}: HTTP {e.code}{hint}") from e
+            conn = self.connect()
         except OSError as e:
             raise DnsError(f"cannot reach OPNsense at {self.url}: {e}") from e
+        try:
+            conn.request(method, path, body=data, headers=headers)
+            r = conn.getresponse()
+            status, text = r.status, r.read()
+        except OSError as e:
+            raise DnsError(f"cannot reach OPNsense at {self.url}: {e}") from e
+        finally:
+            conn.close()
+        if status >= 400:
+            hint = {401: " (wrong key/secret)", 403: " (the key's user lacks the Dnsmasq privilege)"}.get(status, "")
+            raise DnsError(f"OPNsense {method} {path}: HTTP {status}{hint}")
         try:
             return json.loads(text or b"{}")
         except ValueError:
